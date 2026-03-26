@@ -1,3 +1,12 @@
+import argparse
+import sys
+from pathlib import Path
+parent_dir = Path(__file__).resolve().parent.parent
+# Add parent directory to sys.path if not already present
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+
+
 import random
 import numpy as np
 from tqdm import tqdm
@@ -6,15 +15,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-import sys
-from pathlib import Path
-parent_dir = Path(__file__).resolve().parent.parent
-# Add parent directory to sys.path if not already present
-if str(parent_dir) not in sys.path:
-    sys.path.insert(0, str(parent_dir))
-
 from engine import *
-from agent import SimpleRuleAgent
+from agent import SimpleRuleAgent, SmarterRuleAgent
 
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -167,7 +169,7 @@ def encode_obs(obs, agent_ids):
     Returns a fixed-size float vector for an MLP-style DQN.
 
     agent_ids: int (user's player id) or list/tuple [user_id, opp_id].
-    When a single int is given the opponent is inferred as the other
+    When a single int is given the enemy is inferred as the other
     player in a 2-player game (1 - user_id).
     """
     if obs is None:
@@ -226,12 +228,14 @@ def encode_obs(obs, agent_ids):
 
 
 
-def train_dqn(user_id=0, opponent_type="simple", num_episodes=100, max_steps=500, seed=86):
+def train_dqn(user_id=0, enemy_type="simple", num_episodes=100, max_steps=500, seed=86):
     env = BomberEnv(max_steps=max_steps, seed=seed)
-    if opponent_type == "simple":
+    if enemy_type == "simple":
         enemy_agent = SimpleRuleAgent(1)
+    elif enemy_type == "smarter":
+        enemy_agent = SmarterRuleAgent(1)
     else:
-        raise ValueError(f"Invalid opponent type: {opponent_type}")
+        raise ValueError(f"Invalid enemy type: {enemy_type}")
 
     # hyperparam
     epsilon_start = 1.0
@@ -301,5 +305,11 @@ def train_dqn(user_id=0, opponent_type="simple", num_episodes=100, max_steps=500
         
 
 if __name__ == "__main__":
-    train_dqn(num_episodes=200)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--enemy_type", type=str, default="simple")
+    parser.add_argument("--num_episodes", type=int, default=200)
+    parser.add_argument("--max_steps", type=int, default=500)
+    parser.add_argument("--seed", type=int, default=86)
+    args = parser.parse_args()
+    train_dqn(enemy_type=args.enemy_type, num_episodes=args.num_episodes, max_steps=args.max_steps, seed=args.seed)
     # env = BomberEnv()

@@ -1,8 +1,8 @@
 import random
 
 class RandomAgent:
-    def __init__(self, player_id):
-        self.player_id = player_id
+    def __init__(self, agent_id: int):
+        self.agent_id = agent_id
     
-    def act(self, observation):
+    def act(self, obs):
         return random.randint(0, 5)

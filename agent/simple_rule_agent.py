@@ -11,18 +11,18 @@ class SimpleRuleAgent:
         4: (0, 1),
     }
 
-    def __init__(self, player_id):
-        self.player_id = int(player_id)
+    def __init__(self, agent_id):
+        self.agent_id = int(agent_id)
 
     def act(self, observation):
         grid = observation["map"]
         players = observation["players"]
         bombs = observation["bombs"]
 
-        if self.player_id >= len(players) or players[self.player_id][2] != 1:
+        if self.agent_id >= len(players) or players[self.agent_id][2] != 1:
             return 0
 
-        my_x, my_y, _, bombs_left, bomb_bonus = players[self.player_id]
+        my_x, my_y, _, bombs_left, bomb_bonus = players[self.agent_id]
         my_pos = (int(my_x), int(my_y))
         bomb_radius = max(1, int(bomb_bonus) + 1)
         bomb_positions = {(int(b[0]), int(b[1])) for b in bombs}
@@ -30,12 +30,12 @@ class SimpleRuleAgent:
         occupied = {
             (int(p[0]), int(p[1]))
             for i, p in enumerate(players)
-            if i != self.player_id and p[2] == 1
+            if i != self.agent_id and p[2] == 1
         }
         enemies = [
             (int(p[0]), int(p[1]))
             for i, p in enumerate(players)
-            if i != self.player_id and p[2] == 1
+            if i != self.agent_id and p[2] == 1
         ]
 
         blocked = set(occupied) | bomb_positions
