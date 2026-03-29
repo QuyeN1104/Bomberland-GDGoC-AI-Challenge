@@ -29,7 +29,7 @@ class ReplayBuffer:
         self.pos       = 0
         self.size      = 0
         self.map_shape = tuple(map_shape)
-        self.aux_dim = int(aux_dim)
+        self.aux_dim   = int(aux_dim)
         self.map_states      = np.zeros((capacity, *self.map_shape), dtype=np.float32)
         self.aux_states      = np.zeros((capacity, self.aux_dim), dtype=np.float32)
         self.next_map_states = np.zeros((capacity, *self.map_shape), dtype=np.float32)

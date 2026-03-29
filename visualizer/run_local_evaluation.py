@@ -230,6 +230,15 @@ def clone_obs(obs):
 	}
 
 
+ACTION_MIRROR = {0: 0, 1: 2, 2: 1, 3: 4, 4: 3, 5: 5}
+
+
+def rotate_map_180(map_feat):
+	"""Flip spatial features both vertically and horizontally (180-degree rotation)
+	so a bottom-right agent sees the board as if it were at top-left."""
+	return np.flip(map_feat, axis=(1, 2)).copy()
+
+
 def simulate_episodes(model_paths, num_episodes=10, max_steps=500, seed=None):
 	env = BomberEnv(max_steps=max_steps)
 	agents, names = make_agents(model_paths, seed=seed)
@@ -238,7 +247,6 @@ def simulate_episodes(model_paths, num_episodes=10, max_steps=500, seed=None):
 	for episode in range(num_episodes):
 		episode_seed = None if seed is None else seed + episode
 		obs = env.reset(seed=episode_seed)
-		encoded_obs = encode_obs(obs, agent_ids=[i for i in range(len(agents))])
 		done = False
 		step = 0
 		trajectory = [clone_obs(obs)]
@@ -247,7 +255,14 @@ def simulate_episodes(model_paths, num_episodes=10, max_steps=500, seed=None):
 			actions = []
 			for i in range(len(agents)):
 				if isinstance(agents[i], DQNAgent):
-					actions.append(agents[i].act(*encoded_obs, epsilon=0.05))
+					opp_id = 1 - i
+					map_feat, aux_feat = encode_obs(obs, agent_ids=[i, opp_id])
+					if i != 0:
+						map_feat = rotate_map_180(map_feat)
+					action = agents[i].act(map_feat, aux_feat, epsilon=0.05)
+					if i != 0:
+						action = ACTION_MIRROR[action]
+					actions.append(action)
 				else:
 					actions.append(agents[i].act(obs))
 			obs, terminated, truncated = env.step(actions)
