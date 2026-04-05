@@ -254,6 +254,7 @@ def pretrain_bc_lstm(
     if best_sd is not None:
         model.load_state_dict(best_sd)
         model.to(device)
+    model.train()
     print(f"  BC done — best val loss: {best_val:.4f}")
     return history
 
@@ -332,6 +333,7 @@ def train_bc_ppo_lstm(
 
     if load_checkpoint_path:
         load_checkpoint(load_checkpoint_path, model, device, optimizer)
+        model.train()
     elif not skip_bc:
         print("Phase 1: Behavioral cloning (LSTM policy, i.i.d. windows)")
         pretrain_bc_lstm(model, bc_data, device, bc_epochs=bc_epochs)
@@ -365,6 +367,8 @@ def train_bc_ppo_lstm(
     prev_l = list(prev_l)
 
     c, hh, ww = map_l[0].shape
+    model.train()
+
     _epm = max(1, min(n_env, minibatch_size // max(1, ppo_steps)))
     print(
         f"Phase 2: PPO+LSTM  device={device}  parallel_envs={n_env}  "
