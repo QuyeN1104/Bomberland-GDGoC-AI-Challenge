@@ -494,21 +494,31 @@ def train_bc_ppo_lstm(
                     act_list[e.agent_id] = e.act(obs_l[n])
                 next_obs, term, trunc = envs[n].step(act_list)
                 done = term or trunc
+                # Log at most reward_log_episodes completions. Episodes can overlap in
+                # vectorized rollouts; only print when the global budget still allows it.
                 if ep_log_this[n]:
-                    comp_buf: dict[str, float] = {}
-                    r, ep_l[n] = compute_reward_icec(
-                        prev_l[n], next_obs, user_id, ep_l[n], out_components=comp_buf
-                    )
+                    if reward_log_done < reward_log_episodes:
+                        comp_buf: dict[str, float] = {}
+                        r, ep_l[n] = compute_reward_icec(
+                            prev_l[n], next_obs, user_id, ep_l[n], out_components=comp_buf
+                        )
+                        for k, v in comp_buf.items():
+                            if k not in ("dense_decay", "dense_applied"):
+                                ep_comp_sum[n][k] += float(v)
+                    else:
+                        r, ep_l[n] = compute_reward_icec(
+                            prev_l[n], next_obs, user_id, ep_l[n]
+                        )
                     ep_reward_sum[n] += r
-                    for k, v in comp_buf.items():
-                        if k not in ("dense_decay", "dense_applied"):
-                            ep_comp_sum[n][k] += float(v)
                 else:
                     r, ep_l[n] = compute_reward_icec(prev_l[n], next_obs, user_id, ep_l[n])
                 stor_rew[t, n] = r
                 stor_done[t, n] = float(done)
                 if done:
-                    if ep_log_this[n]:
+                    if (
+                        ep_log_this[n]
+                        and reward_log_done < reward_log_episodes
+                    ):
                         print(
                             f"[reward components] finished_episode={reward_log_done + 1}/"
                             f"{reward_log_episodes} env={n} return={ep_reward_sum[n]:.4f}"
