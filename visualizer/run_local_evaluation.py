@@ -246,7 +246,8 @@ def make_agents(model_paths, seed=None):
 				agents[i].load_agent(pretrained_model=path)
 				names[i] = os.path.basename(path)
 		else:
-			x = random.randint(0, 6)
+			# x = random.randint(0, 6)
+			x = 5 if i == 0 else 3 if i == 1 else 1 if i == 2 else 4
 			if x == 0:
 				names[i] = "RandomAgent"
 				agents[i] = RandomAgent(i)
