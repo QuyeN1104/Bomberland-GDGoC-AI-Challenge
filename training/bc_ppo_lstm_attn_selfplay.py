@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import csv
 import os
 import random
 import sys
@@ -62,6 +63,17 @@ except ImportError:
 
 
 BC_BASE_CLASS_WEIGHTS = torch.tensor([0.3, 1.0, 1.0, 1.0, 1.0, 1.8], dtype=torch.float32)
+
+
+def _csv_append(path: str, fieldnames: list[str], row: dict) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            w.writeheader()
+        safe_row = {k: row.get(k, "") for k in fieldnames}
+        w.writerow(safe_row)
 
 
 def _build_bc_class_weights(actions: np.ndarray, device: str) -> torch.Tensor:
@@ -650,6 +662,8 @@ def train_bc_ppo_attn_selfplay(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    base_dir = Path(__file__).resolve().parent.parent  # repo root
+
     demo_opp_ids = [i for i in range(4) if i != 0]
     enemy_type_tag = "_".join(normalize_opponent_names(enemy_type, demo_opp_ids))
 
@@ -686,9 +700,33 @@ def train_bc_ppo_attn_selfplay(
     optimizer = optim.Adam(model.parameters(), lr=lr, eps=1e-5)
 
     tag = f"bcppo_{model_variant}_{expert_type}_{enemy_type_tag}_p{parallel_envs}_s{seed}"
-    out_dir = f"ckpts/{tag}"
-    pool_dir = f"{out_dir}/pool"
+    out_dir = str(base_dir / "ckpts" / tag)
+    pool_dir = str(Path(out_dir) / "pool")
     os.makedirs(pool_dir, exist_ok=True)
+
+    ppo_csv_path = str(Path(out_dir) / "metrics_ppo.csv")
+    eval_csv_path = str(Path(out_dir) / "metrics_eval_elo.csv")
+    ppo_fields = [
+        "update",
+        "model_variant",
+        "pi_loss",
+        "v_loss",
+        "entropy",
+        "total_obj",
+        "rollout_return_mean",
+        "reward_mean",
+        "reward_std",
+        "pool_size",
+        "elo_current",
+    ]
+    eval_fields = [
+        "update",
+        "model_variant",
+        "eval_games",
+        "pool_size",
+        "elo_current",
+        "elo_top5",
+    ]
 
     bc_loss_history: list[float] = []
     if load_checkpoint_path:
@@ -699,7 +737,7 @@ def train_bc_ppo_attn_selfplay(
         bc_loss_history = pretrain_bc(model, bc_data, device, bc_epochs=bc_epochs)
         if save_model:
             save_checkpoint(
-                f"{out_dir}/after_bc.pth",
+                str(Path(out_dir) / "after_bc.pth"),
                 model,
                 None,
                 {
@@ -950,10 +988,33 @@ def train_bc_ppo_attn_selfplay(
         ppo_loss_history.append(float(total_obj.item()))
         pbar.set_postfix(pi=f"{pi_loss.item():.3f}", v=f"{v_loss.item():.3f}", ent=f"{ent_scalar.item():.3f}")
 
+        # Metrics CSV (every update)
+        try:
+            rew_flat = stor_rew.reshape(-1)
+            _csv_append(
+                ppo_csv_path,
+                ppo_fields,
+                {
+                    "update": int(upd + 1),
+                    "model_variant": str(model_variant),
+                    "pi_loss": float(pi_loss.item()),
+                    "v_loss": float(v_loss.item()),
+                    "entropy": float(ent_scalar.item()),
+                    "total_obj": float(total_obj.item()),
+                    "rollout_return_mean": float(rollout_return_history[-1]) if rollout_return_history else "",
+                    "reward_mean": float(np.mean(rew_flat)) if rew_flat.size else "",
+                    "reward_std": float(np.std(rew_flat)) if rew_flat.size else "",
+                    "pool_size": int(len(pool)),
+                    "elo_current": float(elo.rating.get(current_policy_id, 1000.0)),
+                },
+            )
+        except Exception as e:
+            print(f"[warn] failed writing PPO metrics csv: {e}")
+
         # Periodic snapshot to pool
         if save_model and snapshot_interval > 0 and (upd + 1) % snapshot_interval == 0:
             snap_id = f"upd{upd+1}"
-            snap_path = f"{pool_dir}/{snap_id}.pth"
+            snap_path = str(Path(pool_dir) / f"{snap_id}.pth")
             save_checkpoint(
                 snap_path,
                 model,
@@ -995,17 +1056,33 @@ def train_bc_ppo_attn_selfplay(
                 top = sorted(elo.rating.items(), key=lambda kv: kv[1], reverse=True)[:5]
                 top_str = ", ".join(f"{k}:{v:.0f}" for k, v in top)
                 print(f"[ELO] top: {top_str}")
+                # Eval/ELO metrics CSV (every evaluation)
+                try:
+                    _csv_append(
+                        eval_csv_path,
+                        eval_fields,
+                        {
+                            "update": int(upd + 1),
+                            "model_variant": str(model_variant),
+                            "eval_games": int(eval_games),
+                            "pool_size": int(len(pool)),
+                            "elo_current": float(elo.rating.get(current_policy_id, 1000.0)),
+                            "elo_top5": top_str,
+                        },
+                    )
+                except Exception as e:
+                    print(f"[warn] failed writing eval/ELO metrics csv: {e}")
 
     os.makedirs(out_dir, exist_ok=True)
     if bc_loss_history:
-        plot_loss(bc_loss_history, save_path=f"{out_dir}/{tag}_bc_loss.png")
-    plot_loss(ppo_loss_history, save_path=f"{out_dir}/{tag}_ppo_loss.png")
-    plot_rewards(reward_history, save_path=f"{out_dir}/{tag}_rewards.png")
-    plot_moving_average(rollout_return_history, window_size=10, save_path=f"{out_dir}/{tag}_moving_avg.png")
+        plot_loss(bc_loss_history, save_path=str(Path(out_dir) / f"{tag}_bc_loss.png"))
+    plot_loss(ppo_loss_history, save_path=str(Path(out_dir) / f"{tag}_ppo_loss.png"))
+    plot_rewards(reward_history, save_path=str(Path(out_dir) / f"{tag}_rewards.png"))
+    plot_moving_average(rollout_return_history, window_size=10, save_path=str(Path(out_dir) / f"{tag}_moving_avg.png"))
 
     if save_model:
         save_checkpoint(
-            f"{out_dir}/final.pth",
+            str(Path(out_dir) / "final.pth"),
             model,
             optimizer,
             {
