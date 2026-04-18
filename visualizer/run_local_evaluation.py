@@ -19,6 +19,7 @@ from agent import RandomAgent, SimpleRuleAgent, SmarterRuleAgent, TacticalRuleAg
 from training import encode_obs, DQNAgent, DQfDAgent
 from training.SQIL import encode_obs as sqil_encode_obs
 from training.bc_ppo_lstm import BC_PPO_LSTM_Agent, is_bc_ppo_lstm_checkpoint
+from training.bc_ppo_lstm_attn_selfplay import ActorCriticAttnLSTM
 
 class Viewer:
 	PLAYER_COLORS = [(220, 50, 50), (50, 50, 220), (30, 150, 30), (200, 140, 0)]
@@ -223,6 +224,83 @@ def str2bool(value):
 	raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
 
 
+def is_bc_ppo_attn_selfplay_checkpoint(ckpt: dict) -> bool:
+	"""True for checkpoints produced by training/bc_ppo_lstm_attn_selfplay.py."""
+	if ckpt.get("agent_type") == "bc_ppo_lstm_attn_selfplay":
+		return True
+	meta = ckpt.get("meta")
+	if isinstance(meta, dict) and meta.get("model_variant") in {"lstm", "attn", "attn_lstm"} and (
+		meta.get("input_spec") is not None or ckpt.get("input_shape") is not None
+	):
+		return True
+	return False
+
+
+class BC_PPO_AttnSelfplay_Agent:
+	"""Greedy / ε-greedy wrapper (supports lstm/attn/attn_lstm variants)."""
+
+	def __init__(
+		self,
+		agent_id: int,
+		checkpoint_path: str,
+		device: str | None = None,
+		force_variant: str | None = None,
+	):
+		self.agent_id = int(agent_id)
+		self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+		ckpt = torch.load(checkpoint_path, map_location=self.device)
+		meta = ckpt.get("meta", {})
+		input_spec = meta.get("input_spec") or ckpt.get("input_shape")
+		if input_spec is None:
+			raise ValueError(f"Checkpoint {checkpoint_path!r} missing meta['input_spec'] or input_shape")
+		map_shape = tuple(input_spec[0])
+		aux_dim = int(input_spec[1])
+		num_actions = int(meta.get("num_actions", ckpt.get("num_actions", 6)))
+		variant = force_variant or meta.get("model_variant", "lstm")
+		if variant not in {"lstm", "attn", "attn_lstm"}:
+			raise ValueError(f"Invalid model variant {variant!r} for {checkpoint_path!r}")
+
+		self.map_shape = map_shape
+		self.aux_dim = aux_dim
+		self.num_actions = num_actions
+		self.variant = variant
+
+		self.model = ActorCriticAttnLSTM(
+			map_shape=map_shape,
+			aux_dim=aux_dim,
+			num_actions=num_actions,
+			variant=variant,
+			map_feat_dim=int(meta.get("map_feat_dim", 128)),
+			aux_embed_dim=int(meta.get("aux_embed_dim", 32)),
+			lstm_hidden=int(meta.get("lstm_hidden", 128)),
+			lstm_layers=int(meta.get("lstm_layers", 1)),
+			attn_d_model=int(meta.get("attn_d_model", 128)),
+			attn_heads=int(meta.get("attn_heads", 4)),
+			pos_max_h=int(meta.get("pos_max_h", 32)),
+			pos_max_w=int(meta.get("pos_max_w", 32)),
+		).to(self.device)
+		self.model.load_state_dict(ckpt["model_state_dict"])
+		self.model.eval()
+		self._hidden = None
+
+	def reset_memory(self) -> None:
+		self._hidden = None
+
+	def act(self, map_state, aux_state, epsilon: float = 0.0) -> int:
+		m = torch.from_numpy(map_state).float().unsqueeze(0).to(self.device)
+		aux = torch.from_numpy(aux_state).float().unsqueeze(0).to(self.device)
+		with torch.no_grad():
+			if self.model.use_lstm:
+				if self._hidden is None:
+					self._hidden = self.model.init_hidden(1, self.device)
+				logits, _, self._hidden = self.model.forward_step(m, aux, self._hidden)
+			else:
+				logits, _, _ = self.model.forward_step(m, aux, None)
+		if random.random() < float(epsilon):
+			return random.randint(0, self.num_actions - 1)
+		return int(logits.argmax(dim=-1).item())
+
+
 def make_agents(model_paths, seed=None):
 	agents = [None] * len(model_paths)
 	names = [None] * len(model_paths)
@@ -234,7 +312,12 @@ def make_agents(model_paths, seed=None):
 	for i, path in enumerate(model_paths):
 		if path != "None":
 			checkpoint = torch.load(path, map_location="cpu")
-			if is_bc_ppo_lstm_checkpoint(checkpoint):
+			# IMPORTANT: check new checkpoint type first because old bc_ppo_lstm
+			# heuristic can match on meta keys (input_spec/lstm_hidden) and mis-detect.
+			if is_bc_ppo_attn_selfplay_checkpoint(checkpoint):
+				agents[i] = BC_PPO_AttnSelfplay_Agent(i, path, device=dev)
+				names[i] = os.path.basename(path)
+			elif is_bc_ppo_lstm_checkpoint(checkpoint):
 				agents[i] = BC_PPO_LSTM_Agent(i, path, device=dev)
 				names[i] = os.path.basename(path)
 			else:
@@ -347,9 +430,18 @@ def _encode_for_model_agent(obs, agent_id, all_agent_ids, agent):
 	return encode_obs(obs, agent_ids=[agent_id, opp_id])
 
 
-def simulate_episodes(model_paths, num_episodes=10, max_steps=500, seed=None):
+def simulate_episodes(model_paths, num_episodes=10, max_steps=500, seed=None, model_variants=None):
 	env = BomberEnv(max_steps=max_steps)
 	agents, names = make_agents(model_paths, seed=seed)
+	# Optional: override variant for new model agents
+	if model_variants:
+		for i, mv in enumerate(model_variants):
+			if not mv or mv == "auto":
+				continue
+			if isinstance(agents[i], BC_PPO_AttnSelfplay_Agent):
+				# reload with forced variant
+				agents[i] = BC_PPO_AttnSelfplay_Agent(i, model_paths[i], device=("cuda" if torch.cuda.is_available() else "cpu"), force_variant=mv)
+				names[i] = f"{names[i]}[{mv}]"
 	episodes = []
 	num_agents = len(agents)
 
@@ -366,7 +458,7 @@ def simulate_episodes(model_paths, num_episodes=10, max_steps=500, seed=None):
 		while not done and step < max_steps:
 			actions = []
 			for i in range(len(agents)):
-				if isinstance(agents[i], (DQNAgent, DQfDAgent, BC_PPO_LSTM_Agent)):
+				if isinstance(agents[i], (DQNAgent, DQfDAgent, BC_PPO_LSTM_Agent, BC_PPO_AttnSelfplay_Agent)):
 					opp_ids = [pid for pid in range(num_agents) if pid != i]
 					encoded = _encode_for_model_agent(obs, i, opp_ids, agents[i])
 					if isinstance(encoded, tuple) and len(encoded) == 2:
@@ -393,12 +485,13 @@ def simulate_episodes(model_paths, num_episodes=10, max_steps=500, seed=None):
 	return episodes, names
 
 
-def run_simple_viewer(model_paths, num_episodes=10, max_steps=100, seed=None, autoplay=True):
+def run_simple_viewer(model_paths, num_episodes=10, max_steps=100, seed=None, autoplay=True, model_variants=None):
 	episodes, agent_names = simulate_episodes(
 		model_paths=model_paths,
 		num_episodes=num_episodes,
 		max_steps=max_steps,
 		seed=seed,
+		model_variants=model_variants,
 	)
 	if not episodes:
 		print("No episodes to display.")
@@ -464,9 +557,17 @@ def run_simple_viewer(model_paths, num_episodes=10, max_steps=100, seed=None, au
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(
-		description="Local viewer. model_paths: DQfD/SQIL .pth or BC+PPO+LSTM ckpts (final.pth / after_bc.pth)."
+		description="Local viewer. model_paths: DQfD/SQIL .pth, BC+PPO+LSTM ckpts, or BC+PPO+Attn(+LSTM) ckpts."
 	)
 	parser.add_argument("--model_paths", nargs="+", default=["None", "None", "None", "None"])
+	parser.add_argument(
+		"--model_variants",
+		nargs="+",
+		default=None,
+		choices=["auto", "lstm", "attn", "attn_lstm"],
+		help="Optional per-player override for BC+PPO+Attn checkpoints (same length as --model_paths). "
+			 "Use 'auto' to read from checkpoint meta.",
+	)
 	parser.add_argument("--num_episodes", type=int, default=10)
 	parser.add_argument("--max_steps", type=int, default=500)
 	parser.add_argument("--seed", type=int, default=None)
@@ -479,4 +580,5 @@ if __name__ == "__main__":
 		max_steps=args.max_steps,
 		seed=args.seed,
 		autoplay=args.autoplay,
+		model_variants=args.model_variants,
 	)

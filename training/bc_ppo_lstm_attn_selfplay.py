@@ -20,6 +20,7 @@ import csv
 import os
 import random
 import sys
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence, Union, Literal
@@ -49,6 +50,7 @@ try:
     )
     from .reward_02 import EpisodeRewardState, compute_reward_icec
     from .utils import plot_loss, plot_moving_average, plot_rewards
+    from .train_shared_utils import csv_append as _csv_append_shared, save_checkpoint as save_checkpoint_shared, load_checkpoint as load_checkpoint_shared
 except ImportError:
     from bomber_shared import (
         AGENT_LOOKUP,
@@ -60,20 +62,16 @@ except ImportError:
     )
     from reward_02 import EpisodeRewardState, compute_reward_icec
     from utils import plot_loss, plot_moving_average, plot_rewards
+    from train_shared_utils import csv_append as _csv_append_shared, save_checkpoint as save_checkpoint_shared, load_checkpoint as load_checkpoint_shared
 
 
 BC_BASE_CLASS_WEIGHTS = torch.tensor([0.3, 1.0, 1.0, 1.0, 1.0, 1.8], dtype=torch.float32)
 
+_PASSABLE_TILES = {0, 3, 4}  # Map.GRASS=0, ITEM_RADIUS=3, ITEM_CAPACITY=4 in engine/map.py
+
 
 def _csv_append(path: str, fieldnames: list[str], row: dict) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    write_header = not os.path.exists(path)
-    with open(path, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        if write_header:
-            w.writeheader()
-        safe_row = {k: row.get(k, "") for k in fieldnames}
-        w.writerow(safe_row)
+    _csv_append_shared(path, fieldnames, row)
 
 
 def _build_bc_class_weights(actions: np.ndarray, device: str) -> torch.Tensor:
@@ -85,6 +83,147 @@ def _build_bc_class_weights(actions: np.ndarray, device: str) -> torch.Tensor:
     data_weights = torch.from_numpy(inv).to(device)
     weights = data_weights * BC_BASE_CLASS_WEIGHTS.to(device)
     return torch.clamp(weights, min=0.25, max=4.0)
+
+
+def _blast_tiles_from_grid(grid: np.ndarray, bx: int, by: int, radius: int) -> list[tuple[int, int]]:
+    """Return tiles affected by a bomb at (bx,by) on the given grid."""
+    h, w = grid.shape
+    tiles: list[tuple[int, int]] = [(bx, by)]
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        for r in range(1, int(radius) + 1):
+            tx, ty = bx + dx * r, by + dy * r
+            if not (0 <= tx < h and 0 <= ty < w):
+                break
+            cell = int(grid[tx, ty])
+            if cell == 1:  # wall
+                break
+            tiles.append((tx, ty))
+            if cell == 2:  # box stops blast
+                break
+    return tiles
+
+
+def _bfs_reachable_mask(grid: np.ndarray, start: tuple[int, int], k: int) -> np.ndarray:
+    """Binary mask of cells reachable within <=k steps on passable tiles."""
+    h, w = grid.shape
+    out = np.zeros((h, w), dtype=np.float32)
+    sx, sy = int(start[0]), int(start[1])
+    if not (0 <= sx < h and 0 <= sy < w):
+        return out
+    if int(grid[sx, sy]) not in _PASSABLE_TILES:
+        return out
+    from collections import deque
+
+    dq = deque()
+    dq.append((sx, sy, 0))
+    seen = {(sx, sy)}
+    out[sx, sy] = 1.0
+    while dq:
+        x, y, d = dq.popleft()
+        if d >= int(k):
+            continue
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if not (0 <= nx < h and 0 <= ny < w):
+                continue
+            if (nx, ny) in seen:
+                continue
+            if int(grid[nx, ny]) not in _PASSABLE_TILES:
+                continue
+            seen.add((nx, ny))
+            out[nx, ny] = 1.0
+            dq.append((nx, ny, d + 1))
+    return out
+
+
+def append_rule_planes(
+    map_base: np.ndarray,
+    aux_state: np.ndarray,
+    obs: dict | None,
+    agent_id: int,
+    soon_threshold: int = 2,
+    safe_reach_k: int = 6,
+    bomb_max_timer: int = 7,
+) -> np.ndarray:
+    """Append rule-based planes to encoded map.
+
+    Adds 3 channels:
+    - danger_tte_norm: (H,W) min time-to-explosion / bomb_max_timer (0 if safe)
+    - danger_soon:     (H,W) 1 if min TTE <= soon_threshold else 0
+    - reachable_safe_k:(H,W) reachable within K AND not danger_soon
+
+    If `obs` is provided, uses raw bombs + owner radius bonuses for more accurate blast.
+    Otherwise, falls back to an approximation using existing encoded planes:
+    - bomb locations from `bomb_timer` plane
+    - radius = 1 + aux_radius_bonus for owned bombs, else radius=1
+    """
+    h, w = map_base.shape[1], map_base.shape[2]
+
+    if obs is not None:
+        grid = obs["map"]
+        bombs = obs["bombs"]
+        players = obs["players"]
+        danger_tte = np.zeros((h, w), dtype=np.float32)
+        for b in bombs:
+            bx, by, timer, owner_id = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+            radius = 1
+            if 0 <= owner_id < players.shape[0]:
+                radius = 1 + int(players[owner_id][4])
+            tiles = _blast_tiles_from_grid(grid, bx, by, radius)
+            for tx, ty in tiles:
+                tte = float(timer) / float(bomb_max_timer)
+                if danger_tte[tx, ty] == 0.0 or tte < danger_tte[tx, ty]:
+                    danger_tte[tx, ty] = tte
+        # position from raw obs
+        px, py, alive = int(players[agent_id][0]), int(players[agent_id][1]), int(players[agent_id][2])
+        start = (px, py) if alive == 1 else (-1, -1)
+        reach = _bfs_reachable_mask(grid, start=start, k=safe_reach_k)
+    else:
+        # Approximate from encoded map planes.
+        # bomber_shared encode order: ... my_pos, opp_pos(3), bomb_timer, bomb_owned
+        bomb_timer = map_base[-2]
+        bomb_owned = map_base[-1]
+        grid = np.zeros((h, w), dtype=np.int8)
+        # tiles are one-hot in the first 5 channels: grass, wall, box, item_radius, item_capacity
+        grid[map_base[1] > 0.5] = 1
+        grid[map_base[2] > 0.5] = 2
+        grid[map_base[3] > 0.5] = 3
+        grid[map_base[4] > 0.5] = 4
+
+        my_pos = map_base[5]
+        pos_idx = np.argwhere(my_pos > 0.5)
+        start = (int(pos_idx[0][0]), int(pos_idx[0][1])) if len(pos_idx) else (-1, -1)
+
+        danger_tte = np.zeros((h, w), dtype=np.float32)
+        bomb_cells = np.argwhere(bomb_timer > 0.0)
+        my_radius_bonus = float(aux_state[1]) if aux_state.shape[0] >= 2 else 0.0
+        for bx, by in bomb_cells:
+            timer_norm = float(bomb_timer[int(bx), int(by)])
+            timer = max(1, int(round(timer_norm * bomb_max_timer)))
+            owned = float(bomb_owned[int(bx), int(by)]) > 0.5
+            radius = 1 + int(round(my_radius_bonus * 10.0)) if owned else 1
+            tiles = _blast_tiles_from_grid(grid, int(bx), int(by), radius)
+            for tx, ty in tiles:
+                tte = float(timer) / float(bomb_max_timer)
+                if danger_tte[tx, ty] == 0.0 or tte < danger_tte[tx, ty]:
+                    danger_tte[tx, ty] = tte
+        reach = _bfs_reachable_mask(grid, start=start, k=safe_reach_k)
+
+    danger_soon = (danger_tte > 0.0) & (danger_tte * float(bomb_max_timer) <= float(soon_threshold))
+    danger_soon_f = danger_soon.astype(np.float32)
+    reachable_safe = (reach > 0.5) & (~danger_soon)
+    reachable_safe_f = reachable_safe.astype(np.float32)
+
+    out = np.concatenate(
+        [
+            map_base,
+            danger_tte[None, :, :],
+            danger_soon_f[None, :, :],
+            reachable_safe_f[None, :, :],
+        ],
+        axis=0,
+    ).astype(np.float32)
+    return out
 
 
 class AuxMLP(nn.Module):
@@ -267,6 +406,7 @@ class ActorCriticAttnLSTM(nn.Module):
         pos_max_w: int = 32,
     ):
         super().__init__()
+        self.map_shape = tuple(map_shape)
         self.variant: ModelVariant = variant
         self.aux_dim = int(aux_dim)
         self.aux_embed = AuxMLP(aux_dim=aux_dim, embed_dim=aux_embed_dim)
@@ -276,11 +416,11 @@ class ActorCriticAttnLSTM(nn.Module):
         self.lstm_layers = int(lstm_layers)
 
         if variant == "lstm":
-            self.map_enc = MapEncoderNoPool(map_shape, feat_dim=map_feat_dim)
+            self.map_enc = MapEncoderNoPool(self.map_shape, feat_dim=map_feat_dim)
             trunk_dim = self.map_enc.feat_dim + self.aux_embed.embed_dim
         else:
             self.map_enc = SpatialAttentionEncoder(
-                map_shape, d_model=attn_d_model, n_heads=attn_heads, pos_max_h=pos_max_h, pos_max_w=pos_max_w
+                self.map_shape, d_model=attn_d_model, n_heads=attn_heads, pos_max_h=pos_max_h, pos_max_w=pos_max_w
             )
             trunk_dim = self.map_enc.d_model + self.aux_embed.embed_dim
 
@@ -439,31 +579,21 @@ def pretrain_bc(
 
 
 def save_checkpoint(path: str, model: nn.Module, optimizer, meta: dict):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    meta = dict(meta)
-    meta.setdefault("num_actions", NUM_ACTIONS)
-    payload = {
-        "model_state_dict": model.state_dict(),
-        "meta": meta,
-        "agent_type": "bc_ppo_lstm_attn_selfplay",
-        "num_actions": int(meta["num_actions"]),
-    }
-    if meta.get("input_spec") is not None:
-        payload["input_shape"] = meta["input_spec"]
-        payload["input_spec"] = meta["input_spec"]
-    if optimizer is not None:
-        payload["optimizer_state_dict"] = optimizer.state_dict()
-    torch.save(payload, path)
+    save_checkpoint_shared(
+        path=path,
+        model=model,
+        optimizer=optimizer,
+        meta=meta,
+        agent_type="bc_ppo_lstm_attn_selfplay",
+        num_actions=NUM_ACTIONS,
+    )
     print(f"Saved checkpoint {path}")
 
 
 def load_checkpoint(path: str, model: nn.Module, device: str, optimizer=None):
-    ckpt = torch.load(path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
-    if optimizer is not None and "optimizer_state_dict" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    meta = load_checkpoint_shared(path=path, model=model, device=device, optimizer=optimizer)
     print(f"Loaded checkpoint {path}")
-    return ckpt.get("meta", {})
+    return meta
 
 
 @dataclass
@@ -519,6 +649,8 @@ class PolicySnapshotAgent:
 
         map_shape = tuple(input_spec[0])
         aux_dim = int(input_spec[1])
+        self.map_shape = map_shape
+        self.aux_dim = aux_dim
         num_actions = int(meta.get("num_actions", ckpt.get("num_actions", NUM_ACTIONS)))
         variant: ModelVariant = meta.get("model_variant", "lstm")
         self.variant = variant
@@ -545,7 +677,17 @@ class PolicySnapshotAgent:
         self._hidden = None
 
     def act(self, obs: dict, agent_ids: list[int]) -> int:
-        map_state, aux_state = encode_obs(obs, [self.agent_id, *[i for i in agent_ids if i != self.agent_id]])
+        map_state, aux_state = encode_obs(
+            obs, [self.agent_id, *[i for i in agent_ids if i != self.agent_id]]
+        )
+        # If checkpoint expects augmented channels, append rule planes.
+        if int(self.map_shape[0]) > int(map_state.shape[0]):
+            map_state = append_rule_planes(
+                map_base=map_state,
+                aux_state=aux_state,
+                obs=obs,
+                agent_id=self.agent_id,
+            )
         m = torch.from_numpy(map_state).float().unsqueeze(0).to(self.device)
         a = torch.from_numpy(aux_state).float().unsqueeze(0).to(self.device)
         with torch.no_grad():
@@ -596,6 +738,8 @@ def evaluate_and_update_elo(
 
         for _ in range(max_steps):
             m0, a0 = encode_obs(obs, agent_ids)
+            if int(getattr(current_model, "map_shape", (m0.shape[0],))[0]) > int(m0.shape[0]):
+                m0 = append_rule_planes(m0, a0, obs=obs, agent_id=0)
             m_t = torch.from_numpy(m0).float().unsqueeze(0).to(device)
             a_t = torch.from_numpy(a0).float().unsqueeze(0).to(device)
             with torch.no_grad():
@@ -658,31 +802,108 @@ def train_bc_ppo_attn_selfplay(
     eval_interval: int = 100,
     eval_games: int = 8,
     elo_k: float = 24.0,
+    danger_soon_threshold: int = 2,
+    safe_reach_k: int = 6,
+    kl_beta: float = 0.02,
+    kl_start_update: int = 0,
+    p_scripted: float = 0.25,
+    elo_delta: float = 200.0,
+    eval_scripted_interval: int = 200,
+    eval_scripted_games: int = 8,
 ):
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     base_dir = Path(__file__).resolve().parent.parent  # repo root
 
+    # --- Resume training (optional) ---
+    resume_ckpt = None
+    resume_meta: dict = {}
+    resume_input_spec = None
+    start_update = 0
+    if load_checkpoint_path:
+        resume_ckpt = torch.load(load_checkpoint_path, map_location=device)
+        resume_meta = resume_ckpt.get("meta", {}) if isinstance(resume_ckpt.get("meta", {}), dict) else {}
+        resume_input_spec = resume_meta.get("input_spec") or resume_ckpt.get("input_shape")
+        # Prefer continuing in-place in the same output folder.
+        out_dir = str(Path(load_checkpoint_path).resolve().parent)
+        pool_dir = str(Path(out_dir) / "pool")
+        os.makedirs(pool_dir, exist_ok=True)
+
+        # Force model config to match the checkpoint to avoid shape mismatches.
+        model_variant = str(resume_meta.get("model_variant", model_variant))  # type: ignore[assignment]
+        map_feat_dim = int(resume_meta.get("map_feat_dim", map_feat_dim))
+        aux_embed_dim = int(resume_meta.get("aux_embed_dim", aux_embed_dim))
+        attn_d_model = int(resume_meta.get("attn_d_model", attn_d_model))
+        attn_heads = int(resume_meta.get("attn_heads", attn_heads))
+        pos_max_h = int(resume_meta.get("pos_max_h", pos_max_h))
+        pos_max_w = int(resume_meta.get("pos_max_w", pos_max_w))
+        lstm_hidden = int(resume_meta.get("lstm_hidden", lstm_hidden))
+        lstm_layers = int(resume_meta.get("lstm_layers", lstm_layers))
+        danger_soon_threshold = int(resume_meta.get("danger_soon_threshold", danger_soon_threshold))
+        safe_reach_k = int(resume_meta.get("safe_reach_k", safe_reach_k))
+        kl_beta = float(resume_meta.get("kl_beta", kl_beta))
+        kl_start_update = int(resume_meta.get("kl_start_update", kl_start_update))
+
+        # Continue PPO after the last completed update (if tracked).
+        start_update = int(resume_meta.get("ppo_updates_done", resume_meta.get("update", 0)))
+        # If resuming, BC is skipped (we already have weights).
+        skip_bc = True
+
     demo_opp_ids = [i for i in range(4) if i != 0]
     enemy_type_tag = "_".join(normalize_opponent_names(enemy_type, demo_opp_ids))
 
-    bc_data, _, input_spec = collect_demonstrations(
-        expert_type=expert_type,
-        opponent_type=enemy_type,
-        num_episodes=demo_episodes,
-        max_steps=max_steps,
-        seed=seed,
-        augment=True,
-        store_dqfd_buffer=False,
-        reward_fn=None,
-    )
-    if len(bc_data["action"]) == 0:
-        print("No BC data — increase demo_episodes or weaken opponents.")
-        return
+    # Only collect demos if we are going to run BC.
+    bc_data = None
+    input_spec = None
+    if not skip_bc:
+        bc_data, _, input_spec = collect_demonstrations(
+            expert_type=expert_type,
+            opponent_type=enemy_type,
+            num_episodes=demo_episodes,
+            max_steps=max_steps,
+            seed=seed,
+            augment=True,
+            store_dqfd_buffer=False,
+            reward_fn=None,
+        )
+        if len(bc_data["action"]) == 0:
+            print("No BC data — increase demo_episodes or weaken opponents.")
+            return
+    else:
+        # Resume path: take input_spec from checkpoint.
+        if resume_input_spec is None:
+            raise ValueError("load_checkpoint_path provided but checkpoint missing input_spec")
+        input_spec = resume_input_spec
 
-    map_shape = tuple(input_spec[0])
-    aux_dim = int(input_spec[1])
+    # Augment BC dataset maps with rule planes computed from encoded features.
+    # This keeps BC compatible with the augmented online PPO input.
+    if bc_data is not None:
+        bc_maps = bc_data["map"]
+        bc_aux = bc_data["aux"]
+        bc_aug = np.zeros(
+            (bc_maps.shape[0], bc_maps.shape[1] + 3, bc_maps.shape[2], bc_maps.shape[3]),
+            dtype=np.float32,
+        )
+        for i in range(bc_maps.shape[0]):
+            bc_aug[i] = append_rule_planes(
+                map_base=bc_maps[i],
+                aux_state=bc_aux[i],
+                obs=None,
+                agent_id=0,
+                soon_threshold=danger_soon_threshold,
+                safe_reach_k=safe_reach_k,
+            )
+        bc_data["map"] = bc_aug
+
+    if bc_data is not None:
+        map_shape = tuple(bc_data["map"][0].shape)
+        aux_dim = int(input_spec[1])
+        input_spec = (map_shape, aux_dim)
+    else:
+        map_shape = tuple(input_spec[0])
+        aux_dim = int(input_spec[1])
+        input_spec = (map_shape, aux_dim)
     model = ActorCriticAttnLSTM(
         map_shape=map_shape,
         aux_dim=aux_dim,
@@ -700,9 +921,10 @@ def train_bc_ppo_attn_selfplay(
     optimizer = optim.Adam(model.parameters(), lr=lr, eps=1e-5)
 
     tag = f"bcppo_{model_variant}_{expert_type}_{enemy_type_tag}_p{parallel_envs}_s{seed}"
-    out_dir = str(base_dir / "ckpts" / tag)
-    pool_dir = str(Path(out_dir) / "pool")
-    os.makedirs(pool_dir, exist_ok=True)
+    if not load_checkpoint_path:
+        out_dir = str(base_dir / "ckpts" / tag)
+        pool_dir = str(Path(out_dir) / "pool")
+        os.makedirs(pool_dir, exist_ok=True)
 
     ppo_csv_path = str(Path(out_dir) / "metrics_ppo.csv")
     eval_csv_path = str(Path(out_dir) / "metrics_eval_elo.csv")
@@ -718,6 +940,8 @@ def train_bc_ppo_attn_selfplay(
         "reward_std",
         "pool_size",
         "elo_current",
+        "kl_beta",
+        "kl_loss",
     ]
     eval_fields = [
         "update",
@@ -726,15 +950,21 @@ def train_bc_ppo_attn_selfplay(
         "pool_size",
         "elo_current",
         "elo_top5",
+        "scripted_winrate",
     ]
 
     bc_loss_history: list[float] = []
+    teacher: ActorCriticAttnLSTM | None = None
     if load_checkpoint_path:
         load_checkpoint(load_checkpoint_path, model, device, optimizer)
         model.train()
     if not skip_bc:
         print(f"Phase 1: Behavioral cloning (variant={model_variant})")
         bc_loss_history = pretrain_bc(model, bc_data, device, bc_epochs=bc_epochs)
+        teacher = deepcopy(model).to(device)
+        teacher.eval()
+        for p in teacher.parameters():
+            p.requires_grad_(False)
         if save_model:
             save_checkpoint(
                 str(Path(out_dir) / "after_bc.pth"),
@@ -751,8 +981,17 @@ def train_bc_ppo_attn_selfplay(
                     "pos_max_w": pos_max_w,
                     "lstm_hidden": lstm_hidden,
                     "lstm_layers": lstm_layers,
+                    "danger_soon_threshold": int(danger_soon_threshold),
+                    "safe_reach_k": int(safe_reach_k),
+                    "kl_beta": float(kl_beta),
+                    "kl_start_update": int(kl_start_update),
                 },
             )
+    else:
+        teacher = deepcopy(model).to(device)
+        teacher.eval()
+        for p in teacher.parameters():
+            p.requires_grad_(False)
 
     enemy_ids = [i for i in range(4) if i != user_id]
     enemy_names = list(normalize_opponent_names(enemy_type, enemy_ids))
@@ -770,6 +1009,24 @@ def train_bc_ppo_attn_selfplay(
     elo = EloState(rating={}, k=float(elo_k))
     current_policy_id = "current"
 
+    # If resuming, rebuild pool from existing snapshots on disk.
+    if load_checkpoint_path and os.path.isdir(pool_dir):
+        snaps = []
+        for fn in os.listdir(pool_dir):
+            if fn.startswith("upd") and fn.endswith(".pth"):
+                snaps.append(fn)
+        def _upd_num(name: str) -> int:
+            try:
+                return int(name[3:].split(".")[0])
+            except Exception:
+                return -1
+        snaps.sort(key=_upd_num)
+        for fn in snaps[-int(pool_max_size):]:
+            sid = fn.split(".")[0]
+            spath = str(Path(pool_dir) / fn)
+            pool.append((sid, spath))
+            elo.rating.setdefault(sid, 1000.0)
+
     ep_reward_sum = [0.0] * n_env
     ep_comp_sum: list[defaultdict[str, float]] = [defaultdict(float) for _ in range(n_env)]
     ep_log_this = [False] * n_env
@@ -778,9 +1035,21 @@ def train_bc_ppo_attn_selfplay(
     env_opponents: list[list[object]] = [[] for _ in range(n_env)]
 
     def _choose_enemy(eid: int):
+        # Keep some scripted opponents for diversity even when pool exists.
+        if rng.random() < float(p_scripted):
+            for a in scripted_enemy_agents:
+                if int(a.agent_id) == int(eid):
+                    return a
         if pool and (rng.random() < float(p_selfplay)):
             # Sample opponents with mild ELO bias: softmax over ratings.
+            curr = float(elo.rating.get(current_policy_id, 1000.0))
             ratings = np.array([elo.rating.get(pid, 1000.0) for pid, _ in pool], dtype=np.float32)
+            # Prefer near-ELO opponents when possible.
+            near = np.abs(ratings - curr) <= float(elo_delta)
+            if np.any(near):
+                ratings2 = ratings.copy()
+                ratings2[~near] = ratings2.min() - 1000.0
+                ratings = ratings2
             p = np.exp((ratings - ratings.max()) / 200.0)
             p = p / p.sum()
             idx = int(rng.choice(len(pool), p=p))
@@ -792,9 +1061,54 @@ def train_bc_ppo_attn_selfplay(
                 return a
         raise RuntimeError(f"missing scripted agent for id {eid}")
 
+    def _eval_vs_scripted(n_games: int) -> float:
+        """Return winrate vs scripted enemies (learner is player0)."""
+        if n_games <= 0:
+            return float("nan")
+        wins = 0
+        for gi in range(int(n_games)):
+            env = BomberEnv(max_steps=max_steps, seed=int(rng.integers(0, 2**31 - 1)))
+            obs = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
+            # fixed set: current enemy agents by id
+            scripted = [_choose_enemy(eid) for eid in enemy_ids]
+            # ensure scripted are actually scripted
+            scripted = [a for a in scripted if not isinstance(a, PolicySnapshotAgent)]
+            h = None
+            if model.use_lstm:
+                h = model.init_hidden(1, device)
+            for _ in range(max_steps):
+                m0, a0 = encode_obs(obs, agent_ids)
+                m0 = append_rule_planes(m0, a0, obs=obs, agent_id=user_id, soon_threshold=danger_soon_threshold, safe_reach_k=safe_reach_k)
+                m_t = torch.from_numpy(m0).float().unsqueeze(0).to(device)
+                a_t = torch.from_numpy(a0).float().unsqueeze(0).to(device)
+                with torch.no_grad():
+                    if model.use_lstm:
+                        logits0, _, h = model.forward_step(m_t, a_t, h)
+                    else:
+                        logits0, _, _ = model.forward_step(m_t, a_t, None)
+                act_list = [None] * 4
+                act_list[user_id] = int(logits0.argmax(dim=-1).item())
+                for opp in scripted_enemy_agents:
+                    act_list[opp.agent_id] = opp.act(obs)
+                obs, term, trunc = env.step(act_list)
+                if term or trunc:
+                    break
+            alive = obs["players"][:, 2].astype(np.int8)
+            if int(alive[user_id]) == 1 and sum(int(a) == 1 for a in alive) == 1:
+                wins += 1
+        return float(wins) / float(max(1, int(n_games)))
+
     def reset_env_state(ei: int):
         obs = envs[ei].reset(seed=int(rng.integers(0, 2**31 - 1)))
         m, a = encode_obs(obs, agent_ids)
+        m = append_rule_planes(
+            map_base=m,
+            aux_state=a,
+            obs=obs,
+            agent_id=user_id,
+            soon_threshold=danger_soon_threshold,
+            safe_reach_k=safe_reach_k,
+        )
         ep = EpisodeRewardState()
         prev = None
         ep_reward_sum[ei] = 0.0
@@ -826,7 +1140,10 @@ def train_bc_ppo_attn_selfplay(
     reward_history: list[float] = []
     rollout_return_history: list[float] = []
 
-    pbar = tqdm(range(ppo_updates), desc=f"PPO({model_variant})")
+    if start_update > 0:
+        print(f"Resuming PPO from update {start_update + 1}/{ppo_updates} (checkpoint={load_checkpoint_path})")
+
+    pbar = tqdm(range(start_update, ppo_updates), desc=f"PPO({model_variant})")
     for upd in pbar:
         stor_m = np.zeros((ppo_steps, n_env, c, hh, ww), dtype=np.float32)
         stor_a = np.zeros((ppo_steps, n_env, aux_dim), dtype=np.float32)
@@ -902,7 +1219,16 @@ def train_bc_ppo_attn_selfplay(
                     obs_l[n], map_l[n], aux_l[n], ep_l[n], prev_l[n] = reset_env_state(n)
                 else:
                     obs_l[n] = next_obs
-                    map_l[n], aux_l[n] = encode_obs(next_obs, agent_ids)
+                    m_next, a_next = encode_obs(next_obs, agent_ids)
+                    m_next = append_rule_planes(
+                        map_base=m_next,
+                        aux_state=a_next,
+                        obs=next_obs,
+                        agent_id=user_id,
+                        soon_threshold=danger_soon_threshold,
+                        safe_reach_k=safe_reach_k,
+                    )
+                    map_l[n], aux_l[n] = m_next, a_next
                     prev_l[n] = next_obs
 
         reward_history.extend(stor_rew.reshape(-1).tolist())
@@ -942,10 +1268,12 @@ def train_bc_ppo_attn_selfplay(
         envs_per_mb = max(1, min(n_env, minibatch_size // max(1, ppo_steps)))
 
         pi_loss = v_loss = ent_scalar = torch.zeros((), device=device)
+        kl_scalar = torch.zeros((), device=device)
         for _ in range(ppo_epochs):
             env_order = np.random.permutation(n_env)
             n_mb = 0
             pi_acc = v_acc = ent_acc = 0.0
+            kl_acc = 0.0
             for s in range(0, n_env, envs_per_mb):
                 idx = env_order[s: s + envs_per_mb]
                 idx_t = torch.tensor(idx, device=device, dtype=torch.long)
@@ -968,7 +1296,17 @@ def train_bc_ppo_attn_selfplay(
                 surr2 = torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef) * mb_adv
                 pi_loss = -torch.min(surr1, surr2).mean()
                 v_loss = F.mse_loss(values_full, mb_ret)
-                loss = pi_loss + vf_coef * v_loss - ent_coef * entropy
+                # KL(anchor) to frozen post-BC teacher to prevent catastrophic drift.
+                kl_loss = torch.zeros((), device=device)
+                if teacher is not None and float(kl_beta) > 0.0 and int(upd + 1) >= int(kl_start_update):
+                    with torch.no_grad():
+                        t_logits, _t_values = teacher.forward_sequence(
+                            mb_map, mb_aux, mb_done if teacher.use_lstm else None
+                        )
+                    p_t = F.softmax(t_logits.reshape(-1, NUM_ACTIONS), dim=-1)
+                    logp_s = F.log_softmax(logits_full.reshape(-1, NUM_ACTIONS), dim=-1)
+                    kl_loss = (p_t * (torch.log(p_t + 1e-8) - logp_s)).sum(dim=-1).mean()
+                loss = pi_loss + vf_coef * v_loss - ent_coef * entropy + float(kl_beta) * kl_loss
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -979,10 +1317,12 @@ def train_bc_ppo_attn_selfplay(
                 pi_acc += pi_loss.item()
                 v_acc += v_loss.item()
                 ent_acc += entropy.item()
+                kl_acc += float(kl_loss.detach().item())
 
             pi_loss = torch.tensor(pi_acc / max(n_mb, 1), device=device)
             v_loss = torch.tensor(v_acc / max(n_mb, 1), device=device)
             ent_scalar = torch.tensor(ent_acc / max(n_mb, 1), device=device)
+            kl_scalar = torch.tensor(kl_acc / max(n_mb, 1), device=device)
 
         total_obj = pi_loss + vf_coef * v_loss - ent_coef * ent_scalar
         ppo_loss_history.append(float(total_obj.item()))
@@ -1006,6 +1346,8 @@ def train_bc_ppo_attn_selfplay(
                     "reward_std": float(np.std(rew_flat)) if rew_flat.size else "",
                     "pool_size": int(len(pool)),
                     "elo_current": float(elo.rating.get(current_policy_id, 1000.0)),
+                    "kl_beta": float(kl_beta),
+                    "kl_loss": float(kl_scalar.item()),
                 },
             )
         except Exception as e:
@@ -1030,6 +1372,9 @@ def train_bc_ppo_attn_selfplay(
                     "pos_max_w": pos_max_w,
                     "lstm_hidden": lstm_hidden,
                     "lstm_layers": lstm_layers,
+                    "danger_soon_threshold": int(danger_soon_threshold),
+                    "safe_reach_k": int(safe_reach_k),
+                    "ppo_updates_done": int(upd + 1),
                 },
             )
             pool.append((snap_id, snap_path))
@@ -1058,6 +1403,9 @@ def train_bc_ppo_attn_selfplay(
                 print(f"[ELO] top: {top_str}")
                 # Eval/ELO metrics CSV (every evaluation)
                 try:
+                    scripted_wr = ""
+                    if eval_scripted_interval > 0 and (upd + 1) % eval_scripted_interval == 0:
+                        scripted_wr = _eval_vs_scripted(eval_scripted_games)
                     _csv_append(
                         eval_csv_path,
                         eval_fields,
@@ -1068,6 +1416,7 @@ def train_bc_ppo_attn_selfplay(
                             "pool_size": int(len(pool)),
                             "elo_current": float(elo.rating.get(current_policy_id, 1000.0)),
                             "elo_top5": top_str,
+                            "scripted_winrate": scripted_wr,
                         },
                     )
                 except Exception as e:
@@ -1097,6 +1446,11 @@ def train_bc_ppo_attn_selfplay(
                 "lstm_hidden": lstm_hidden,
                 "lstm_layers": lstm_layers,
                 "parallel_envs": n_env,
+                "danger_soon_threshold": int(danger_soon_threshold),
+                "safe_reach_k": int(safe_reach_k),
+                "kl_beta": float(kl_beta),
+                "kl_start_update": int(kl_start_update),
+                "ppo_updates_done": int(ppo_updates),
             },
         )
 
@@ -1153,6 +1507,14 @@ if __name__ == "__main__":
     parser.add_argument("--eval_interval", type=int, default=100)
     parser.add_argument("--eval_games", type=int, default=8)
     parser.add_argument("--elo_k", type=float, default=24.0)
+    parser.add_argument("--danger_soon_threshold", type=int, default=2)
+    parser.add_argument("--safe_reach_k", type=int, default=6)
+    parser.add_argument("--kl_beta", type=float, default=0.02)
+    parser.add_argument("--kl_start_update", type=int, default=0)
+    parser.add_argument("--p_scripted", type=float, default=0.25)
+    parser.add_argument("--elo_delta", type=float, default=200.0)
+    parser.add_argument("--eval_scripted_interval", type=int, default=200)
+    parser.add_argument("--eval_scripted_games", type=int, default=8)
 
     args = parser.parse_args()
 
@@ -1200,4 +1562,12 @@ if __name__ == "__main__":
         eval_interval=args.eval_interval,
         eval_games=args.eval_games,
         elo_k=args.elo_k,
+        danger_soon_threshold=args.danger_soon_threshold,
+        safe_reach_k=args.safe_reach_k,
+        kl_beta=args.kl_beta,
+        kl_start_update=args.kl_start_update,
+        p_scripted=args.p_scripted,
+        elo_delta=args.elo_delta,
+        eval_scripted_interval=args.eval_scripted_interval,
+        eval_scripted_games=args.eval_scripted_games,
     )

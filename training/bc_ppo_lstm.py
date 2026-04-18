@@ -39,6 +39,7 @@ try:
     )
     from .reward_02 import EpisodeRewardState, compute_reward_icec
     from .utils import plot_loss, plot_moving_average, plot_rewards
+    from .train_shared_utils import save_checkpoint as save_checkpoint_shared, load_checkpoint as load_checkpoint_shared, seed_everything
 except ImportError:
     from bomber_shared import (
         AGENT_LOOKUP,
@@ -50,6 +51,7 @@ except ImportError:
     )
     from reward_02 import EpisodeRewardState, compute_reward_icec
     from utils import plot_loss, plot_moving_average, plot_rewards
+    from train_shared_utils import save_checkpoint as save_checkpoint_shared, load_checkpoint as load_checkpoint_shared, seed_everything
 
 BC_BASE_CLASS_WEIGHTS = torch.tensor([0.3, 1.0, 1.0, 1.0, 1.0, 1.8], dtype=torch.float32)
 
@@ -279,31 +281,14 @@ def pretrain_bc_lstm(
 
 
 def save_checkpoint(path: str, model, optimizer, meta: dict):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    meta = dict(meta)
-    meta.setdefault("num_actions", NUM_ACTIONS)
-    payload = {
-        "model_state_dict": model.state_dict(),
-        "meta": meta,
-        "agent_type": "bc_ppo_lstm",
-        "num_actions": int(meta["num_actions"]),
-    }
-    if meta.get("input_spec") is not None:
-        payload["input_shape"] = meta["input_spec"]
-        payload["input_spec"] = meta["input_spec"]
-    if optimizer is not None:
-        payload["optimizer_state_dict"] = optimizer.state_dict()
-    torch.save(payload, path)
+    save_checkpoint_shared(path, model, optimizer, meta, agent_type="bc_ppo_lstm", num_actions=NUM_ACTIONS)
     print(f"Saved checkpoint {path}")
 
 
 def load_checkpoint(path: str, model, device, optimizer=None):
-    ckpt = torch.load(path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
-    if optimizer is not None and "optimizer_state_dict" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    meta = load_checkpoint_shared(path, model, device, optimizer)
     print(f"Loaded checkpoint {path}")
-    return ckpt.get("meta", {})
+    return meta
 
 
 def is_bc_ppo_lstm_checkpoint(ckpt: dict) -> bool:
@@ -721,9 +706,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    seed_everything(args.seed)
 
     train_bc_ppo_lstm(
         user_id=args.user_id,

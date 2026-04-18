@@ -21,6 +21,7 @@ from engine import *
 from .reward import compute_reward
 from .utils import plot_loss, plot_rewards, plot_win_rates, plot_moving_average
 from agent import SimpleRuleAgent, SmarterRuleAgent, TacticalRuleAgent, GeniusRuleAgent, BoxFarmerAgent
+from .train_shared_utils import seed_everything, csv_append
 
 class ReplayBuffer:
     """Pre-allocated numpy circular buffer — sample() is pure array indexing, no Python objects."""
@@ -316,6 +317,22 @@ def save_model_fn(model, optimizer, global_step, epsilon, lr, input_spec, num_ac
     torch.save(checkpoint, path)
     print(f"Model saved to {path}")
 
+    # Minimal CSV metrics for later plotting/analysis.
+    try:
+        csv_path = os.path.join(os.path.dirname(path), "metrics_dqn.csv")
+        csv_append(
+            csv_path,
+            ["global_step", "epsilon", "lr", "num_actions"],
+            {
+                "global_step": int(global_step),
+                "epsilon": float(epsilon),
+                "lr": float(lr),
+                "num_actions": int(num_actions),
+            },
+        )
+    except Exception:
+        pass
+
 def load_model_fn(checkpoint):
     """
     Args:
@@ -463,6 +480,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_training", action="store_true", help="Skip training")
     args = parser.parse_args()
     
+    seed_everything(args.seed)
     print("Skip training? ", args.skip_training)
     if not args.skip_training:
         train_dqn(enemy_type=args.enemy_type, 
