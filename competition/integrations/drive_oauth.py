@@ -1,3 +1,4 @@
+import competition.config
 from competition.integrations.drive_upload import create_drive_token
 
 

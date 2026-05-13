@@ -159,7 +159,7 @@ def process_submission_webhook(
     evaluation_result = None
     if submission_id:
         try:
-            from scripts.run_evaluation import run_submission_batch
+            from scripts.organizer.run_evaluation import run_submission_batch
 
             # Allow environment overrides; default to project leaderboard ID and credentials.
             sheet_spreadsheet_id = os.getenv(

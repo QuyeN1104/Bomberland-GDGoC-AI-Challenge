@@ -131,6 +131,10 @@ def validate_zip_bytes(zip_data: bytes):
     if len(agent_candidates) != 1:
         return False, "agent_py_missing_or_multiple", None
 
+    # Forbid requirements.txt as the environment is fixed
+    if any(Path(name).name == "requirements.txt" for name in manifest.keys()):
+        return False, "requirements_txt_forbidden", None
+
     # Syntax sanity check for agent.py
     try:
         agent_src = zf.read(agent_candidates[0]).decode("utf-8")
@@ -142,14 +146,40 @@ def validate_zip_bytes(zip_data: bytes):
 
 
 def extract_zip_bytes(zip_data: bytes, target_dir: Path, manifest: dict) -> None:
+    import os
     """Extract zip archive to target directory based on manifest."""
     target_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Ensure all parent directories up to 'submissions' are accessible to 'nobody'
+    current = target_dir
+    while current.name:
+        try:
+            os.chmod(current, 0o755)
+        except Exception:
+            pass
+        if current.name == 'submissions':
+            break
+        current = current.parent
+    
     with zipfile.ZipFile(io.BytesIO(zip_data), "r") as zf:
         for rel_name in manifest.keys():
             destination = target_dir / rel_name
             destination.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Chmod all intermediate directories inside the zip
+            curr_dest = destination.parent
+            while curr_dest != target_dir:
+                try:
+                    os.chmod(curr_dest, 0o755)
+                except Exception:
+                    pass
+                curr_dest = curr_dest.parent
+            
             with zf.open(rel_name) as source, open(destination, "wb") as dst:
                 dst.write(source.read())
+            
+            # Ensure the extracted file is readable by the sandboxed 'nobody' user
+            os.chmod(destination, 0o644)
 
 
 def authenticate_submission(store: SubmissionStore, canonical_team_id: str, submission_token: str):

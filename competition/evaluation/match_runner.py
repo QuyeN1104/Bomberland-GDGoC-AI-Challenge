@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 
 from competition.integrations.drive_upload import upload_file_to_drive
-from visualizer.bomberland_rendering import render_match_frame
+from competition.evaluation.rendering import render_match_frame
 from engine.game import BomberEnv
 from competition.evaluation.runtime_guard import AgentProcessExecutor
 

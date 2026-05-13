@@ -9,10 +9,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=__USER__
+User=root
 WorkingDirectory=__WORKDIR__
 Environment="PATH=__CONDA_ENV__/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=__CONDA_ENV__/bin/python3 -m scripts.run_evaluation background
+ExecStart=__CONDA_ENV__/bin/python3 -m scripts.organizer.run_evaluation background
 Restart=always
 RestartSec=10
 StandardOutput=journal

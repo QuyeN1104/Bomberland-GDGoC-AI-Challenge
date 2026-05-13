@@ -48,6 +48,21 @@ def sanitize_action(action) -> tuple[int, bool]:
 
 
 def _agent_worker(agent_path: str, agent_id: int, recv_conn, send_conn):
+    import os
+    import pwd
+    
+    # only works if the parent process was started with sudo/root.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        try:
+            # 'nobody' is the standard Linux user with zero permissions
+            nobody = pwd.getpwnam('nobody')
+            os.setgroups([]) # Strip auxiliary groups
+            os.setgid(nobody.pw_gid) # Drop group privileges
+            os.setuid(nobody.pw_uid) # drop user privileges
+        except Exception as exc:
+            send_conn.send({"ok": False, "error": f"sandbox_failed:{exc}"})
+            return
+
     try:
         agent = load_agent_instance(agent_path=agent_path, agent_id=agent_id)
     except Exception as exc:

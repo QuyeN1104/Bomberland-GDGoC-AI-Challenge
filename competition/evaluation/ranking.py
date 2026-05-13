@@ -11,7 +11,7 @@ from competition.storage import SubmissionStore
 class RankingSystem:
     def __init__(self, db_path="competition.db"):
         self.db_path = db_path
-        self.env = trueskill.TrueSkill(draw_probability=0.1)
+        self.env = trueskill.TrueSkill(mu=100.0, sigma=100/3, draw_probability=0.1)
         # Ensures all canonical tables/columns exist in a schema-first way.
         self.store = SubmissionStore(db_path=db_path)
 

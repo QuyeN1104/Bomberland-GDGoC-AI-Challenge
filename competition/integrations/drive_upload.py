@@ -45,8 +45,18 @@ def _build_drive_service(client_secrets_path: str, token_path: str):
         creds = Credentials.from_authorized_user_file(str(token_file), scopes=DEFAULT_SCOPES)
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        _save_user_credentials(creds, token_path)
+        try:
+            creds.refresh(Request())
+            _save_user_credentials(creds, token_path)
+        except Exception as e:
+            # If refresh fails (e.g. revoked or expired testing token), delete the token file
+            # to force a re-authentication next time.
+            if token_file.exists():
+                token_file.unlink()
+            raise RuntimeError(
+                f"Google Drive token refresh failed: {e}. "
+                "The token has been deleted. Please run `python -m competition.integrations.drive_oauth` to re-authorize."
+            ) from e
 
     if not creds or not creds.valid:
         raise RuntimeError(
