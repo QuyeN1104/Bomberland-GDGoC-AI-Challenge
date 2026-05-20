@@ -8,7 +8,7 @@ Bomberland is a multi-agent AI competition inspired by the classic game [Bomb IT
 
 Teams build intelligent agents using strategies from tree search to deep reinforcement learning. The goal is to compete in a 2D grid world collecting power-ups and placing explosives to take your opponent down.
 
-![Bomberland](./logs/gifs/match_20260517_175654_393716.gif)
+![Bomberland](competition/match_20260520_112320_513617.gif)
 
 
 ---
