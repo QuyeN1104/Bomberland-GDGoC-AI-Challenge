@@ -74,6 +74,24 @@ def process_registration_payload(payload: Mapping[str, Any], store: SubmissionSt
     second_contact_email = _get_payload_value(
         normalized, "second_contact_email", "second contact email"
     )
+    university_student_1 = _get_payload_value(
+        normalized, "university_student_1", "university student 1"
+    )
+    university_student_2 = _get_payload_value(
+        normalized, "university_student_2", "university student 2"
+    )
+    student_id_1 = _get_payload_value(
+        normalized, "student_id_1", "student id 1"
+    )
+    student_id_2 = _get_payload_value(
+        normalized, "student_id_2", "student id 2"
+    )
+    majors = _get_payload_value(
+        normalized, "majors", "major"
+    )
+    discord_name = _get_payload_value(
+        normalized, "discord_name", "discord name", "discord"
+    )
     agreement_raw = _get_payload_value(
         normalized,
         "agreement_to_rules",
@@ -91,6 +109,18 @@ def process_registration_payload(payload: Mapping[str, Any], store: SubmissionSt
             "status": "error",
             "error_code": "MISSING_PRIMARY_CONTACT_EMAIL",
             "message": "Primary contact email is required.",
+        }
+    if not university_student_1:
+        return {
+            "status": "error",
+            "error_code": "MISSING_UNIVERSITY_STUDENT_1",
+            "message": "University for Student 1 is required.",
+        }
+    if not student_id_1:
+        return {
+            "status": "error",
+            "error_code": "MISSING_STUDENT_ID_1",
+            "message": "Student ID for Student 1 is required.",
         }
     if not _agreement_checked(agreement_raw):
         return {
@@ -139,6 +169,12 @@ def process_registration_payload(payload: Mapping[str, Any], store: SubmissionSt
         "primary_contact_email": primary_contact_email,
         "second_contact_name": second_contact_name,
         "second_contact_email": second_contact_email,
+        "university_student_1": university_student_1,
+        "university_student_2": university_student_2,
+        "student_id_1": student_id_1,
+        "student_id_2": student_id_2,
+        "majors": majors,
+        "discord_name": discord_name,
         "canonical_team_id": canonical_team_id,
         "submission_token": submission_token,
         "onboarding_email_fields": {
