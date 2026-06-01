@@ -99,13 +99,16 @@ def run_single_finals_match(
             "reason": str(e)
         }
 
-def run_final_evaluation(db_path: str, matches_per_combo: int, parallel_workers: int, enable_gif: bool):
+def run_final_evaluation(db_path: str, matches_per_combo: int, parallel_workers: int, enable_gif: bool, min_games: int = 50):
     logger.info("--- FREEZING LEADERBOARD AND STARTING GRAND FINALS ---")
+    logger.info(f"Eligibility filter: is_team_best = 1, n_games >= {min_games}")
     
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         
-        # Get Top 8 Student Teams by strict score -> mu -> sigma tiebreaking
+        # Get Top 8 Student Teams by strict score -> mu -> sigma tiebreaking.
+        # Only consider submissions with >= min_games matches to ensure
+        # TrueSkill ratings are statistically confident at freeze time.
         cursor.execute(
             """
             SELECT s.submission_id, t.team_name, s.mu, s.sigma, (s.mu - 3 * s.sigma) as score
@@ -114,9 +117,11 @@ def run_final_evaluation(db_path: str, matches_per_combo: int, parallel_workers:
             WHERE s.is_baseline = 0 
               AND s.validation_status = 'valid'
               AND s.is_team_best = 1
+              AND s.n_games >= ?
             ORDER BY score DESC, s.mu DESC, s.sigma ASC
             LIMIT 8
-            """
+            """,
+            (min_games,)
         )
         student_rows = cursor.fetchall()
         
@@ -287,6 +292,7 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     parser.add_argument("--db_path", type=str, default=DEFAULT_DB_PATH, help="Path to DB")
     parser.add_argument("--enable_gif", action="store_true", help="Generate GIFs for finals matches")
+    parser.add_argument("--min_games", type=int, default=50, help="Minimum matches played for a submission to qualify for Top 8 selection")
     if hasattr(os, "geteuid") and os.geteuid() != 0:
         print("ERROR: For security, evaluation must be run with sudo to enable sandboxing.")
         import sys
@@ -294,4 +300,4 @@ if __name__ == "__main__":
         
     args = parser.parse_args()
     
-    run_final_evaluation(args.db_path, args.matches_per_combo, args.workers, args.enable_gif)
+    run_final_evaluation(args.db_path, args.matches_per_combo, args.workers, args.enable_gif, args.min_games)

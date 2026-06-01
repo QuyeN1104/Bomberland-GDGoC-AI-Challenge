@@ -60,7 +60,7 @@ class RankingSystem:
         json_drive_url: Optional[str] = None,
         gif_drive_url: Optional[str] = None,
         match_type: str = "submission_batch",
-        allow_baseline_updates: bool = False,
+        allow_baseline_updates: bool = True,
     ):
         if len(submission_ids) != len(ranks):
             raise ValueError("submission_ids and ranks must have the same length")

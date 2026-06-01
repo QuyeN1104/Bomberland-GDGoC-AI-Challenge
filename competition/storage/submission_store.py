@@ -180,6 +180,7 @@ class SubmissionStore:
             "losses": "INTEGER NOT NULL DEFAULT 0",
             "total_rank": "INTEGER NOT NULL DEFAULT 0",
             "total_steps": "INTEGER NOT NULL DEFAULT 0",
+            "runtime_precheck_passed": "INTEGER NOT NULL DEFAULT 0",
         }
 
         for col, definition in required_defs.items():
@@ -564,27 +565,39 @@ class SubmissionStore:
             for row in rows
         ]
 
-    def list_match_results(self) -> list[dict]:
+    def list_match_results(self, since: Optional[str] = None) -> list[dict]:
+        """Return match results, optionally filtered to only those created after `since`.
+
+        Args:
+            since: If provided, only return matches with created_at > since.
+                   Results are always ordered newest-first (DESC).
+        """
         with self._connect() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT
-                    match_id,
-                    seed,
-                    player_submission_ids_csv,
-                    ranks_csv,
-                    steps_csv,
-                    json_path,
-                    gif_path,
-                    json_drive_url,
-                    gif_drive_url,
-                    match_type,
-                    created_at
-                FROM match_results
-                ORDER BY created_at DESC
-                """
-            )
+            if since:
+                cursor.execute(
+                    """
+                    SELECT
+                        match_id, seed, player_submission_ids_csv,
+                        ranks_csv, steps_csv, json_path, gif_path,
+                        json_drive_url, gif_drive_url, match_type, created_at
+                    FROM match_results
+                    WHERE created_at > ?
+                    ORDER BY created_at DESC
+                    """,
+                    (since,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT
+                        match_id, seed, player_submission_ids_csv,
+                        ranks_csv, steps_csv, json_path, gif_path,
+                        json_drive_url, gif_drive_url, match_type, created_at
+                    FROM match_results
+                    ORDER BY created_at DESC
+                    """
+                )
             rows = cursor.fetchall()
 
         return [
@@ -667,5 +680,18 @@ class SubmissionStore:
                 WHERE submission_id = ?
                 """,
                 (reason, submission_id),
+            )
+            conn.commit()
+
+    def mark_submission_runtime_passed(self, submission_id: str):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE submissions
+                SET runtime_precheck_passed = 1
+                WHERE submission_id = ?
+                """,
+                (submission_id,),
             )
             conn.commit()

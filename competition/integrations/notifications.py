@@ -1,5 +1,7 @@
+import logging
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -60,6 +62,84 @@ def _write_sheet_values(service, spreadsheet_id: str, sheet_name: str, values: l
         valueInputOption="RAW",
         body={"values": values},
     ).execute()
+
+
+def _get_sheet_id(service, spreadsheet_id: str, sheet_name: str) -> Optional[int]:
+    """Return the numeric sheetId for a given tab name, or None if not found."""
+    spreadsheet = service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id, fields="sheets.properties"
+    ).execute()
+    for sheet in spreadsheet.get("sheets", []):
+        if sheet["properties"]["title"] == sheet_name:
+            return sheet["properties"]["sheetId"]
+    return None
+
+
+def _prepend_sheet_values(
+    service, spreadsheet_id: str, sheet_name: str, values: list[list[str]]
+):
+    """Insert new rows at the top of a sheet (right below the header row).
+
+    Uses insertDimension to push existing rows down, then writes data into
+    the newly created blank rows.  This preserves the header at row 1 and
+    keeps the newest entries at the top.
+    """
+    if not values:
+        return
+
+    sheet_id = _get_sheet_id(service, spreadsheet_id, sheet_name)
+    if sheet_id is None:
+        return
+
+    num_rows = len(values)
+
+    # Step 1: Insert blank rows right after the header (startIndex=1 is row 2)
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "insertDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": 1,
+                            "endIndex": 1 + num_rows,
+                        },
+                        "inheritFromBefore": False,
+                    }
+                }
+            ]
+        },
+    ).execute()
+
+    # Step 2: Write the new data into the freshly inserted rows
+    service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{sheet_name}'!A2",
+        valueInputOption="RAW",
+        body={"values": values},
+    ).execute()
+
+
+def _logs_sync_marker_path(db_path: str) -> Path:
+    """Return the path of the sync marker file, stored next to competition.db."""
+    return Path(db_path).resolve().parent / ".last_logs_sync"
+
+
+def _read_logs_sync_marker(db_path: str) -> Optional[str]:
+    """Read the last-synced timestamp from the marker file, or None if missing."""
+    marker = _logs_sync_marker_path(db_path)
+    if marker.exists():
+        content = marker.read_text().strip()
+        return content if content else None
+    return None
+
+
+def _write_logs_sync_marker(db_path: str, timestamp: str) -> None:
+    """Persist the timestamp of the most recently synced match log."""
+    marker = _logs_sync_marker_path(db_path)
+    marker.write_text(timestamp + "\n")
 
 
 def _leaderboard_headers() -> list[str]:
@@ -130,24 +210,42 @@ def build_feedback_values(db_path: str = "competition.db") -> list[list[str]]:
     return values
 
 
-def build_logs_values(db_path: str = "competition.db") -> list[list[str]]:
-    store = SubmissionStore(db_path=db_path)
-    rows = store.list_match_results()
+def _logs_headers() -> list[str]:
+    return ["Created At", "Match ID", "Submission IDs", "JSON Drive URL", "GIF Drive URL", "Match Type", "Seed"]
 
-    values = [["Created At", "Match ID", "Submission IDs", "JSON Drive URL", "GIF Drive URL", "Match Type", "Seed"]]
-    for row in rows:
-        values.append(
-            [
-                _format_created_at(row["created_at"]),
-                row["match_id"],
-                row["player_submission_ids_csv"],
-                row["json_drive_url"] or "",
-                row["gif_drive_url"] or "",
-                row["match_type"],
-                "" if row["seed"] is None else str(row["seed"]),
-            ]
-        )
-    return values
+
+def _logs_row(row: dict) -> list[str]:
+    return [
+        _format_created_at(row["created_at"]),
+        row["match_id"],
+        row["player_submission_ids_csv"],
+        row["json_drive_url"] or "",
+        row["gif_drive_url"] or "",
+        row["match_type"],
+        "" if row["seed"] is None else str(row["seed"]),
+    ]
+
+
+def build_logs_values(db_path: str = "competition.db", since: Optional[str] = None) -> list[list[str]]:
+    """Build log rows for the Google Sheet.
+
+    Args:
+        db_path: Path to the SQLite database.
+        since: If provided, only include matches created after this timestamp.
+               When set, the returned list contains data rows only (no header).
+    """
+    store = SubmissionStore(db_path=db_path)
+    rows = store.list_match_results(since=since)
+
+    if since is not None:
+        # Incremental mode: data rows only, no header (will be prepended)
+        return [_logs_row(row) for row in rows]
+    else:
+        # Full mode: header + all data rows
+        values = [_logs_headers()]
+        for row in rows:
+            values.append(_logs_row(row))
+        return values
 
 
 def update_google_sheets(
@@ -158,6 +256,8 @@ def update_google_sheets(
     include_baseline: bool = True,
     update_feedback: bool = True,
 ):
+    _logger = logging.getLogger(__name__)
+
     credentials_file = credentials_file or os.getenv("LEADERBOARD_CREDENTIALS_FILE", DEFAULT_CREDENTIALS_FILE)
     spreadsheet_id = spreadsheet_id or os.getenv("LEADERBOARD_SPREADSHEET_ID", "")
     sheet_range = sheet_range or os.getenv("LEADERBOARD_SHEET_RANGE", DEFAULT_SHEET_RANGE)
@@ -176,7 +276,17 @@ def update_google_sheets(
 
     values = build_leaderboard_values(db_path=db_path, include_baseline=include_baseline)
     feedback_values = build_feedback_values(db_path=db_path) if update_feedback else []
-    logs_values = build_logs_values(db_path=db_path)
+
+    # --- Incremental Logs sync ---
+    last_sync = _read_logs_sync_marker(db_path)
+    if last_sync:
+        # Incremental: fetch only matches newer than the marker
+        logs_values = build_logs_values(db_path=db_path, since=last_sync)
+        logs_mode = "incremental"
+    else:
+        # First run (or after reset): fetch everything
+        logs_values = build_logs_values(db_path=db_path)
+        logs_mode = "full"
 
     try:
         creds = service_account.Credentials.from_service_account_file(
@@ -186,22 +296,44 @@ def update_google_sheets(
         service = build("sheets", "v4", credentials=creds)
 
         sheet_name = sheet_range.split("!")[0] if "!" in sheet_range else sheet_range
-        
+
         _write_sheet_values(service, spreadsheet_id, sheet_name, values)
-        
+
         if update_feedback:
             _ensure_sheet_tab(service, spreadsheet_id, "Submissions Feedback")
             _write_sheet_values(service, spreadsheet_id, "Submissions Feedback", feedback_values)
-            
+
+        # --- Logs tab ---
         _ensure_sheet_tab(service, spreadsheet_id, "Logs")
-        _write_sheet_values(service, spreadsheet_id, "Logs", logs_values)
+        logs_written = 0
+        if logs_mode == "full":
+            # First run: clear + write header and all rows
+            _write_sheet_values(service, spreadsheet_id, "Logs", logs_values)
+            logs_written = len(logs_values) - 1  # subtract header
+        elif logs_values:
+            # Incremental: prepend only new rows at the top
+            _prepend_sheet_values(service, spreadsheet_id, "Logs", logs_values)
+            logs_written = len(logs_values)
+        # else: no new matches, skip Logs API call entirely
+
+        # Update the sync marker to the newest match timestamp
+        if logs_values:
+            # We need the raw (unformatted) created_at from the DB for the marker.
+            # Query just the single newest match timestamp to avoid re-fetching all rows.
+            store = SubmissionStore(db_path=db_path)
+            newest = store.list_match_results(since=last_sync) if last_sync else store.list_match_results()
+            if newest:
+                # newest is ordered DESC, so index 0 has the latest created_at
+                _write_logs_sync_marker(db_path, newest[0]["created_at"])
+                _logger.info("Logs sync marker updated to %s", newest[0]["created_at"])
 
         return {
             "status": "success",
             "rows_written": len(values) - 1,
             "range": sheet_range,
             "feedback_rows_written": len(feedback_values) - 1 if update_feedback else 0,
-            "log_rows_written": len(logs_values) - 1,
+            "log_rows_written": logs_written,
+            "logs_mode": logs_mode,
         }
     except Exception as e:
         return {

@@ -90,7 +90,9 @@ class BomberEnv:
                         p.bomb_radius_bonus = min(p.bomb_radius_bonus + 1, Player.MAX_BOMB_RADIUS - 1)
                         p.stats['items'] += 1
                     elif cell == Map.ITEM_CAPACITY:
-                        p.bombs_left = min(p.bombs_left + 1, Player.MAX_BOMB_CAPACITY)
+                        if p.max_bombs < Player.MAX_BOMB_CAPACITY:
+                            p.max_bombs += 1
+                            p.bombs_left += 1
                         p.stats['items'] += 1
                 # Remove the item whether collected (1 occupant) or destroyed (>1 occupant)
                 self.map.grid[x, y] = Map.GRASS
@@ -127,7 +129,8 @@ class BomberEnv:
                     if (tx, ty) not in affected_tiles_map:
                         affected_tiles_map[(tx, ty)] = set()
                     affected_tiles_map[(tx, ty)].add(bomb.owner_id)
-                self.players[bomb.owner_id].bombs_left += 1
+                p = self.players[bomb.owner_id]
+                p.bombs_left = min(p.bombs_left + 1, p.max_bombs)
             
             self._apply_explosions(affected_tiles_map)
             self.bombs = [b for b in self.bombs if not b.exploded]

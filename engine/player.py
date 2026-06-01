@@ -16,6 +16,7 @@ class Player:
         self.x = row
         self.y = col
         self.alive = True
+        self.max_bombs = 1
         self.bombs_left = 1
         self.bomb_radius_bonus = 0
         self.stats = {'kills': 0, 'boxes': 0, 'items': 0, 'bombs': 0}

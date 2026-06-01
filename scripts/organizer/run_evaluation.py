@@ -83,7 +83,8 @@ def _fetch_active_candidates(db_path: str):
                 sigma,
                 is_baseline,
                 is_active,
-                n_games
+                n_games,
+                runtime_precheck_passed
             FROM submissions
             WHERE validation_status = 'valid' AND extracted_path IS NOT NULL AND is_active = 1
             """
@@ -107,6 +108,7 @@ def _fetch_active_candidates(db_path: str):
                 "is_baseline": bool(row[5]),
                 "is_active": bool(row[6]),
                 "n_games": int(row[7]),
+                "runtime_precheck_passed": bool(row[8]),
             }
         )
     return candidates
@@ -122,12 +124,17 @@ def _runtime_filter_candidates(
     failed = {}
 
     for item in candidates:
+        if item.get("runtime_precheck_passed"):
+            runnable.append(item)
+            continue
+
         ok, note = runtime_precheck(
             agent_path=item["agent_path"],
             timeout_s=inference_timeout_s,
             startup_timeout_s=startup_timeout_s,
         )
         if ok:
+            store.mark_submission_runtime_passed(item["submission_id"])
             runnable.append(item)
             continue
 

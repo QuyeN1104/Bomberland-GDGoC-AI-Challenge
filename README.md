@@ -72,7 +72,7 @@ If you want to run the submission server locally for testing, follow these steps
     ```
 
 4.  **Run Background Worker**:
-    *(Runs a single batch of default 5 matches).*
+    *(Runs a single batch of default 12 matches).*
     ```bash
     sudo /path/to/conda/env/bin/python3 -m scripts.organizer.run_evaluation background
     ```

@@ -291,7 +291,7 @@ Ranking priority (tie-break):
 4. Update Google Sheets leaderboard.
 
 **Background Job (Continuous):**
-- Workers run continuously in cycles: each cycle runs **5 matches**, followed by a 10-second rest.
+- Workers run continuously in cycles: each cycle runs **12 matches**, followed by a 10-second rest.
 - Each match is sampled from the **Active Pool**, ensuring at least 1 student agent is involved.
 
 ### Active Pool
@@ -365,8 +365,15 @@ Additionally, an **RL-based agent** (`dqn_agent`) is provided as a reference.
 
 ### Selecting Top K
 
-After freezing the leaderboard, **Top 8 teams** are selected based on their best submission, prioritized by:
+After freezing the leaderboard on **21/6**, **Top 8 teams** are selected based on their best submission, with the following eligibility requirements and tiebreakers:
 
+**Eligibility:**
+- Only the **best submission per team** (`is_team_best = 1`) is considered.
+- The submission must have played **≥ 50 matches** to ensure the TrueSkill rating is statistically reliable.
+  - Teams who submitted late and have fewer than 50 matches will **not qualify**, regardless of their score.
+  - This rule incentivizes early and frequent submissions.
+
+**Tiebreakers (in order):**
 1. Highest Score (`μ − 3σ`)
 2. Higher `μ`
 3. Lower `σ`
