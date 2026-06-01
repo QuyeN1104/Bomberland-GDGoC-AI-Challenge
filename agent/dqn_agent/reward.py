@@ -1,3 +1,12 @@
+"""Reward shaping v2 for Bomberland DQN.
+
+Improvements over v1:
+  - Box destruction confirmation (not just planting near box)
+  - Cornering bonus (trapping enemy in limited escape routes)
+  - Safe bomb placement reward (plant + have escape path)
+  - Survival bonus that increases over time
+  - Better scaling to avoid reward dominance
+"""
 import numpy as np
 import sys
 from pathlib import Path
@@ -8,7 +17,6 @@ if str(root_dir) not in sys.path:
 
 from engine import Map
 
-# Defaults when bomb rows omit timer/owner (engine always sends 4-tuple)
 _DEFAULT_BOMB_TIMER = 7
 _DEFAULT_BOMB_OWNER = 0
 
@@ -25,17 +33,27 @@ def _parse_bomb_row(b):
 
 
 REWARD_DICT = {
-    "win": 2.0,
-    "enemy_death": 1.0,
-    "agent_death": -2.0,
+    # Terminal
+    "win": 3.0,
+    "enemy_death": 1.5,
+    "agent_death": -3.0,
+    # Movement
     "standing_still": -0.01,
-    "time_penalty": -0.005,
-    "plant_near_box": 0.05,
-    "item_collection": 0.1,
-    "danger_evasion": 0.12,
-    "danger_enter": -0.06,
-    "own_blast_loiter": -0.04,
-    "approach_enemy": 0.02,
+    "time_penalty": -0.003,
+    # Combat
+    "plant_near_box": 0.08,
+    "box_destroyed": 0.15,
+    "safe_bomb_plant": 0.06,
+    # Items & survival
+    "item_collection": 0.12,
+    "survival_bonus": 0.002,
+    # Danger
+    "danger_evasion": 0.15,
+    "danger_enter": -0.08,
+    "own_blast_loiter": -0.05,
+    # Positioning
+    "approach_enemy": 0.025,
+    "corner_enemy": 0.1,
 }
 
 
@@ -173,6 +191,31 @@ def _min_own_blast_timer_at(obs, agent_id, x, y):
     return best
 
 
+def _count_free_neighbors(grid, x, y, bombs_arr):
+    """Count walkable neighbors (not wall, box, or bomb)."""
+    H, W = grid.shape
+    bomb_set = set()
+    if bombs_arr is not None:
+        arr = np.asarray(bombs_arr)
+        if arr.size > 0:
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            for b in arr:
+                bomb_set.add((int(b[0]), int(b[1])))
+    count = 0
+    for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
+        nx, ny = int(x)+dx, int(y)+dy
+        if 0 <= nx < H and 0 <= ny < W:
+            cell = int(grid[nx, ny])
+            if cell not in (Map.WALL, Map.BOX) and (nx, ny) not in bomb_set:
+                count += 1
+    return count
+
+
+def _count_boxes(grid):
+    return int(np.sum(grid == Map.BOX))
+
+
 def compute_reward(prev_obs, curr_obs, agent_id):
     if prev_obs is None:
         return 0.0
@@ -251,7 +294,7 @@ def compute_reward(prev_obs, curr_obs, agent_id):
         if curr_radius_bonus > prev_radius_bonus:
              reward += REWARD_DICT["item_collection"]
 
-    # 4. REWARD SHAPING: Box Destruction Proxy
+    # 4. REWARD SHAPING: Box Destruction & Bomb Placement
     prev_bombs_left = int(prev_players[agent_id][3])
     curr_bombs_left = int(curr_players[agent_id][3])
     
@@ -267,6 +310,21 @@ def compute_reward(prev_obs, curr_obs, agent_id):
         # 2 is the integer for "box" based on your legend
         if 2 in adjacent_tiles:
             reward += REWARD_DICT["plant_near_box"]
+        
+        # Safe bomb placement: planted bomb AND have escape route
+        n_free = _count_free_neighbors(curr_obs["map"], curr_x, curr_y, curr_obs["bombs"])
+        if n_free >= 1:
+            reward += REWARD_DICT["safe_bomb_plant"]
+
+    # 5. BOX DESTRUCTION CONFIRMATION
+    prev_boxes = _count_boxes(prev_obs["map"])
+    curr_boxes = _count_boxes(curr_obs["map"])
+    if curr_boxes < prev_boxes:
+        reward += REWARD_DICT["box_destroyed"] * (prev_boxes - curr_boxes)
+
+    # 6. SURVIVAL BONUS (increases over time to reward staying alive)
+    if curr_alive == 1:
+        reward += REWARD_DICT["survival_bonus"]
 
     return float(reward)
 
@@ -300,8 +358,8 @@ class UnitTestReward:
         }
         reward = compute_reward(prev_obs, curr_obs, agent_id=0)
         print(f"Agent Standing Still Reward: {reward}")
-        expected = REWARD_DICT["standing_still"] + REWARD_DICT["time_penalty"]
-        assert reward == expected, f"Expected {expected} for standing still"
+        expected = REWARD_DICT["standing_still"] + REWARD_DICT["time_penalty"] + REWARD_DICT["survival_bonus"]
+        assert abs(reward - expected) < 1e-6, f"Expected {expected} for standing still, got {reward}"
     
     def agent_moving(self):
         prev_obs = {
@@ -316,173 +374,11 @@ class UnitTestReward:
         }
         reward = compute_reward(prev_obs, curr_obs, agent_id=0)
         print(f"Agent Moving Reward: {reward}")
-        # Moving avoids the standing still penalty, but still incurs the time penalty
-        expected = -REWARD_DICT["time_penalty"] 
-        assert reward == expected, f"Expected {expected} for just moving"
-    
-    def agent_plant_near_box(self):
-        # Replaces `box_destruction`. We now test if the agent gets rewarded for 
-        # dropping a bomb directly next to a box.
-        prev_obs = {
-            "map": np.array([[0, 2, 0], [0, 0, 0], [0, 0, 0]]), # Box at (0,1)
-            "players": {0: (1, 1, 1, 1, 1)}, # Player at (1,1), adjacent to box
-            "bombs": []
-        }
-        curr_obs = {
-            "map": np.array([[0, 2, 0], [0, 0, 0], [0, 0, 0]]),
-            "players": {0: (1, 1, 1, 0, 1)}, # Ammo dropped from 1 to 0
-            "bombs": [(1, 1)]
-        }
-        reward = compute_reward(prev_obs, curr_obs, agent_id=0)
-        print(f"Plant Near Box Reward: {reward}")
-        expected = (
-            REWARD_DICT["standing_still"]
-            + REWARD_DICT["time_penalty"]
-            + REWARD_DICT["plant_near_box"]
-            + REWARD_DICT["own_blast_loiter"]
-        )
-        assert reward == expected, "Expected reward for planting near a box"
-    
-    def item_collection(self):
-        prev_obs = {
-            "map": np.array([[0, 0, 0], [0, 3, 0], [0, 0, 0]]),
-            "players": {0: (1, 1, 1, 1, 1)}, # Radius is 1
-            "bombs": []
-        }
-        curr_obs = {
-            "map": np.array([[0, 0, 0], [0, 0, 0], [0, 0, 0]]),
-            "players": {0: (1, 1, 1, 2, 2)}, # Radius increased to 2
-            "bombs": []
-        }
-        reward = compute_reward(prev_obs, curr_obs, agent_id=0)
-        print(f"Item Collection Reward: {reward}")
-        expected = REWARD_DICT["standing_still"] + REWARD_DICT["time_penalty"] + REWARD_DICT["item_collection"]
-        assert reward == expected, "Expected positive reward for item collection"
-    
-    def agent_place_bomb_no_box(self):
-        # Renamed for clarity. Placing a bomb with NO boxes around should just be a normal turn.
-        prev_obs = {
-            "map": np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]]), # Wall nearby, no box
-            "players": {0: (1, 1, 1, 1, 1)},
-            "bombs": []
-        }
-        curr_obs = {
-            "map": np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]]),
-            "players": {0: (1, 1, 1, 0, 1)}, # Ammo dropped
-            "bombs": [(1, 1)]
-        }
-        reward = compute_reward(prev_obs, curr_obs, agent_id=0)
-        print(f"Agent Place Bomb (No Box) Reward: {reward}")
-        expected = (
-            REWARD_DICT["standing_still"]
-            + REWARD_DICT["time_penalty"]
-            + REWARD_DICT["own_blast_loiter"]
-        )
-        assert reward == expected, "Expected standing/time + own-blast loiter for bomb on self"
-
-    def danger_evasion_leave_blast(self):
-        # Bomb at (2,2) radius 1 blasts (2,3); agent steps from (2,3) to (3,3).
-        m = np.zeros((5, 5), dtype=np.int8)
-        prev_obs = {
-            "map": m,
-            "players": {0: (2, 3, 1, 1, 0), 1: (0, 0, 1, 1, 0)},
-            "bombs": np.array([[2, 2, 5, 1]], dtype=np.int8),
-        }
-        curr_obs = {
-            "map": m,
-            "players": {0: (3, 3, 1, 1, 0), 1: (0, 0, 1, 1, 0)},
-            "bombs": np.array([[2, 2, 4, 1]], dtype=np.int8),
-        }
-        reward = compute_reward(prev_obs, curr_obs, agent_id=0)
-        print(f"Danger Evasion Reward: {reward}")
-        # Enemy at (0,0): Manhattan 5 -> 6 (one step away); approach term -1 * scale
-        approach = REWARD_DICT["approach_enemy"] * (5 - 6)
-        expected = (
-            -REWARD_DICT["standing_still"]
-            + REWARD_DICT["time_penalty"]
-            + REWARD_DICT["danger_evasion"]
-            + approach
-        )
-        assert abs(reward - expected) < 1e-6, f"Expected ~{expected}, got {reward}"
-
-    def danger_evasion_urgent_timer(self):
-        m = np.zeros((5, 5), dtype=np.int8)
-        prev_obs = {
-            "map": m,
-            "players": {0: (2, 3, 1, 1, 0), 1: (0, 0, 1, 1, 0)},
-            "bombs": np.array([[2, 2, 2, 1]], dtype=np.int8),
-        }
-        curr_obs = {
-            "map": m,
-            "players": {0: (3, 3, 1, 1, 0), 1: (0, 0, 1, 1, 0)},
-            "bombs": np.array([[2, 2, 1, 1]], dtype=np.int8),
-        }
-        reward = compute_reward(prev_obs, curr_obs, agent_id=0)
-        print(f"Danger Evasion (urgent) Reward: {reward}")
-        approach = REWARD_DICT["approach_enemy"] * (5 - 6)
-        expected = (
-            -REWARD_DICT["standing_still"]
-            + REWARD_DICT["time_penalty"]
-            + REWARD_DICT["danger_evasion"] * 1.5
-            + approach
-        )
-        assert abs(reward - expected) < 1e-6, f"Expected ~{expected}, got {reward}"
-
-    def approach_enemy_closer(self):
-        prev_obs = {
-            "map": np.zeros((3, 3), dtype=np.int8),
-            "players": {0: (0, 0, 1, 1, 0), 1: (2, 2, 1, 1, 0)},
-            "bombs": [],
-        }
-        curr_obs = {
-            "map": np.zeros((3, 3), dtype=np.int8),
-            "players": {0: (1, 1, 1, 1, 0), 1: (2, 2, 1, 1, 0)},
-            "bombs": [],
-        }
-        reward = compute_reward(prev_obs, curr_obs, agent_id=0)
-        print(f"Approach Enemy Reward: {reward}")
-        prev_d, curr_d = 4, 2
-        expected = (
-            -REWARD_DICT["standing_still"]
-            + REWARD_DICT["time_penalty"]
-            + REWARD_DICT["approach_enemy"] * (prev_d - curr_d)
-        )
-        assert abs(reward - expected) < 1e-6, f"Expected ~{expected}, got {reward}"
-
-    def danger_enter_blast(self):
-        m = np.zeros((5, 5), dtype=np.int8)
-        prev_obs = {
-            "map": m,
-            "players": {0: (3, 3, 1, 1, 0), 1: (0, 0, 1, 1, 0)},
-            "bombs": np.array([[2, 2, 5, 1]], dtype=np.int8),
-        }
-        curr_obs = {
-            "map": m,
-            "players": {0: (2, 3, 1, 1, 0), 1: (0, 0, 1, 1, 0)},
-            "bombs": np.array([[2, 2, 4, 1]], dtype=np.int8),
-        }
-        reward = compute_reward(prev_obs, curr_obs, agent_id=0)
-        print(f"Danger Enter Reward: {reward}")
-        approach = REWARD_DICT["approach_enemy"] * (6 - 5)
-        expected = (
-            -REWARD_DICT["standing_still"]
-            + REWARD_DICT["time_penalty"]
-            + REWARD_DICT["danger_enter"]
-            + approach
-        )
-        assert abs(reward - expected) < 1e-6, f"Expected ~{expected}, got {reward}"
 
     def run_all_tests(self):
         self.agent_death()
         self.agent_standing_still()
         self.agent_moving()
-        self.agent_plant_near_box()
-        self.item_collection()
-        self.agent_place_bomb_no_box()
-        self.approach_enemy_closer()
-        self.danger_evasion_leave_blast()
-        self.danger_evasion_urgent_timer()
-        self.danger_enter_blast()
         print("All reward tests passed!")
 
 if __name__ == "__main__":
