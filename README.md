@@ -53,7 +53,9 @@ Teams build intelligent agents using strategies from tree search to deep reinfor
 If you want to run the submission server locally for testing, follow these steps to accurately simulate the sandboxed VM environment:
 
 1.  **Setup Environment**:
+    > **⚠️ Conda ToS Warning**: Anaconda's default channels require a paid commercial license for large organizations. To ensure compliance with their Terms of Service, we strongly recommend using [Miniforge](https://github.com/conda-forge/miniforge) or forcing the `conda-forge` channel when creating your environment.
     ```bash
+    conda create -n aic_gdgoc python=3.11 -c conda-forge
     conda activate aic_gdgoc
     pip install -r requirements.txt
     ```
