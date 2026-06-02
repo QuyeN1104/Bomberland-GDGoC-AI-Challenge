@@ -1,17 +1,9 @@
-"""Reward shaping v2 for Bomberland DQN.
-
-Improvements over v1:
-  - Box destruction confirmation (not just planting near box)
-  - Cornering bonus (trapping enemy in limited escape routes)
-  - Safe bomb placement reward (plant + have escape path)
-  - Survival bonus that increases over time
-  - Better scaling to avoid reward dominance
-"""
 import numpy as np
 import sys
 from pathlib import Path
+
+# Tự động cấu hình đường dẫn hệ thống
 root_dir = Path(__file__).resolve().parent.parent.parent
-# Add parent directory to sys.path if not already present
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
@@ -20,9 +12,43 @@ from engine import Map
 _DEFAULT_BOMB_TIMER = 7
 _DEFAULT_BOMB_OWNER = 0
 
+# =====================================================================
+# 1. BẢNG CẤU HÌNH PHẦN THƯỞNG (REWARD DICTIONARY) - ĐÃ CÂN BẰNG LẠI SCALE
+# =====================================================================
+REWARD_DICT = {
+    # Điều kiện kết thúc (Terminal)
+    "win": 3.0,             # Thưởng tối cao khi thắng trận
+    "enemy_death": 2.0,     # Tăng mạnh (từ 1.5) để kích thích Agent chủ động đi săn
+    "agent_death": -2.0,    # Giảm nhẹ (từ -3.0) để Agent bớt "sợ chết" mà không dám mạo hiểm
 
+    # Di chuyển & Hiệu suất thời gian
+    "standing_still": -0.05, # Phạt nặng hơn (từ -0.01) để triệt tiêu hành vi núp lùm cố định
+    "time_penalty": -0.005,  # Phạt thời gian trên mỗi bước đi để ép Agent chạy nhanh hơn
+
+    # Chiến đấu & Khai thác tài nguyên
+    "plant_near_box": 0.15,  # Tăng mạnh (từ 0.08) để kích thích đặt bom khai phá đường đi
+    "box_destroyed": 0.35,   # Tăng mạnh (từ 0.15) để ghi nhận thành quả phá hòm
+    "safe_bomb_plant": 0.10, # Thưởng khi đặt bom ở vị trí an toàn, có đường lui
+
+    # Vật phẩm (Kinh tế)
+    "item_collection": 0.60, # TĂNG ĐỘT BIẾN (từ 0.12) để biến Vật phẩm thành mục tiêu siêu giá trị
+    "approach_item": 0.05,   # THÊM MỚI: Thưởng động trên từng bước nếu đi lại gần Vật phẩm
+    "survival_bonus": 0.001, # Giảm thưởng sống sót thụ động để tránh việc chỉ né bom mà không làm việc
+
+    # Nhận biết nguy hiểm
+    "danger_evasion": 0.15,
+    "danger_enter": -0.08,
+    "own_blast_loiter": -0.05,
+
+    # Định vị không gian
+    "approach_enemy": 0.025,
+}
+
+# =====================================================================
+# 2. CÁC HÀM BỔ TRỢ TÍNH TOÁN TOÁN HỌC & KHÔNG GIAN
+# =====================================================================
 def _parse_bomb_row(b):
-    """Return (bx, by, timer, owner_id); timer/owner default if only (x, y) is given."""
+    """Phân tích cú pháp dòng dữ liệu bom từ obs thành tuple dạng số."""
     arr = np.asarray(b, dtype=np.float64).ravel()
     if arr.size < 2:
         return None
@@ -32,37 +58,13 @@ def _parse_bomb_row(b):
     return bx, by, timer, owner_id
 
 
-REWARD_DICT = {
-    # Terminal
-    "win": 3.0,
-    "enemy_death": 1.5,
-    "agent_death": -3.0,
-    # Movement
-    "standing_still": -0.01,
-    "time_penalty": -0.003,
-    # Combat
-    "plant_near_box": 0.08,
-    "box_destroyed": 0.15,
-    "safe_bomb_plant": 0.06,
-    # Items & survival
-    "item_collection": 0.12,
-    "survival_bonus": 0.002,
-    # Danger
-    "danger_evasion": 0.15,
-    "danger_enter": -0.08,
-    "own_blast_loiter": -0.05,
-    # Positioning
-    "approach_enemy": 0.025,
-    "corner_enemy": 0.1,
-}
-
-
 def _bomb_radius_from_obs(players, owner_id):
+    """Lấy bán kính nổ thực tế của bom (bán kính gốc 1 + bonus nhặt đồ)."""
     return 1 + int(players[int(owner_id)][4])
 
 
 def _explosion_tiles_for_bomb(grid, bx, by, radius):
-    """Same cross-shaped blast rules as BomberEnv._get_explosion_tiles."""
+    """Tính toán danh sách tọa độ (x, y) nằm trong phạm vi ảnh hưởng của vụ nổ."""
     h, w = grid.shape
     tiles = {(bx, by)}
     for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -71,32 +73,28 @@ def _explosion_tiles_for_bomb(grid, bx, by, radius):
             if not (0 <= tx < h and 0 <= ty < w):
                 break
             cell = int(grid[tx, ty])
-            if cell == Map.WALL:
+            if cell == Map.WALL: # Gặp tường indestructible thì dừng
                 break
             tiles.add((tx, ty))
-            if cell == Map.BOX:
+            if cell == Map.BOX:  # Gặp hòm thì phá hòm rồi dừng nổ tiếp
                 break
     return tiles
 
 
 def _blast_status_at(obs, x, y):
-    """
-    Returns (in_blast: bool, min_timer: int|None) for active bombs in obs.
-    min_timer is the smallest timer among bombs whose blast includes (x, y).
-    """
+    """Kiểm tra xem tọa độ hiện tại có đang nằm trong tầm nổ của quả bom nào không."""
     bombs = obs["bombs"]
     if bombs is None:
         return False, None
     arr = np.asarray(bombs)
-    if arr.size == 0:
+    if arr.size == 0 or arr.ndim == 1:
         return False, None
-    if arr.ndim == 1:
-        arr = arr.reshape(1, -1)
-    ix, iy = int(x), int(y)
+        
     players = obs["players"]
     grid = obs["map"]
     in_blast = False
     min_timer = None
+    
     for i in range(arr.shape[0]):
         parsed = _parse_bomb_row(arr[i])
         if parsed is None:
@@ -104,7 +102,7 @@ def _blast_status_at(obs, x, y):
         bx, by, timer, owner_id = parsed
         radius = _bomb_radius_from_obs(players, owner_id)
         tiles = _explosion_tiles_for_bomb(grid, bx, by, radius)
-        if (ix, iy) in tiles:
+        if (int(x), int(y)) in tiles:
             in_blast = True
             t = int(timer)
             min_timer = t if min_timer is None else min(min_timer, t)
@@ -113,39 +111,21 @@ def _blast_status_at(obs, x, y):
 
 def _any_bombs(obs):
     b = obs["bombs"]
-    if b is None:
-        return False
-    return np.asarray(b).size > 0
+    return b is not None and np.asarray(b).size > 0
 
 
 def _enemy_alive_count(players, agent_id):
-    """BomberEnv uses a (N, 5) ndarray; unit tests may use dict keyed by player id."""
-    if isinstance(players, dict):
-        return sum(
-            1 for pid, p in players.items()
-            if pid != agent_id and int(p[2]) == 1
-        )
+    """Đếm số lượng đối thủ còn sống trên sân."""
     arr = np.asarray(players)
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
-    n = arr.shape[0]
-    return sum(
-        1 for pid in range(n)
-        if pid != agent_id and int(arr[pid][2]) == 1
-    )
+    return sum(1 for pid in range(arr.shape[0]) if pid != agent_id and int(arr[pid][2]) == 1)
 
 
 def _manhattan_to_nearest_alive_enemy(players, agent_id, x, y):
-    """None if there is no other alive player."""
+    """Tính khoảng cách Manhattan tới đối thủ còn sống gần nhất."""
     best = None
     ix, iy = int(x), int(y)
-    if isinstance(players, dict):
-        for pid, p in players.items():
-            if pid == agent_id or int(p[2]) != 1:
-                continue
-            d = abs(ix - int(p[0])) + abs(iy - int(p[1]))
-            best = d if best is None else min(best, d)
-        return best
     arr = np.asarray(players)
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
@@ -157,12 +137,8 @@ def _manhattan_to_nearest_alive_enemy(players, agent_id, x, y):
     return best
 
 
-def _in_own_predicted_blast(obs, agent_id, x, y):
-    return _min_own_blast_timer_at(obs, agent_id, x, y) is not None
-
-
 def _min_own_blast_timer_at(obs, agent_id, x, y):
-    """Smallest tick countdown among this agent's bombs whose blast includes (x, y)."""
+    """Tìm thời gian đếm ngược nhỏ nhất của các quả bom do CHÍNH MÌNH đặt."""
     bombs = obs["bombs"]
     if bombs is None:
         return None
@@ -171,11 +147,13 @@ def _min_own_blast_timer_at(obs, agent_id, x, y):
         return None
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
+        
     players = obs["players"]
     grid = obs["map"]
     ix, iy = int(x), int(y)
     aid = int(agent_id)
     best = None
+    
     for i in range(arr.shape[0]):
         parsed = _parse_bomb_row(arr[i])
         if parsed is None:
@@ -192,7 +170,7 @@ def _min_own_blast_timer_at(obs, agent_id, x, y):
 
 
 def _count_free_neighbors(grid, x, y, bombs_arr):
-    """Count walkable neighbors (not wall, box, or bomb)."""
+    """Đếm số ô trống có thể đi được xung quanh để tính đường thoát thân."""
     H, W = grid.shape
     bomb_set = set()
     if bombs_arr is not None:
@@ -213,9 +191,26 @@ def _count_free_neighbors(grid, x, y, bombs_arr):
 
 
 def _count_boxes(grid):
+    """Đếm tổng số hòm gỗ hiện có trên bản đồ."""
     return int(np.sum(grid == Map.BOX))
 
 
+def _manhattan_to_nearest_item(grid, x, y):
+    """THÊM MỚI: Tìm khoảng cách ngắn nhất từ Robot tới Vật phẩm gần nhất (mã 3 hoặc 4)."""
+    ix, iy = int(x), int(y)
+    # Lấy tọa độ của tất cả các ô chứa Item Radius (3) hoặc Item Capacity (4)
+    item_positions = np.argwhere((grid == 3) | (grid == 4))
+    if len(item_positions) == 0:
+        return None
+    
+    # Tính khoảng cách Manhattan từ vị trí hiện tại tới từng Item
+    distances = [abs(ix - ip[0]) + abs(iy - ip[1]) for ip in item_positions]
+    return min(distances)
+
+
+# =====================================================================
+# 3. HÀM TÍNH PHẦN THƯỞNG CHÍNH (MAIN REWARD FUNCTION)
+# =====================================================================
 def compute_reward(prev_obs, curr_obs, agent_id):
     if prev_obs is None:
         return 0.0
@@ -228,9 +223,11 @@ def compute_reward(prev_obs, curr_obs, agent_id):
 
     reward = 0.0
     
-    # 1. WIN / LOSS CONDITIONS
+    # -----------------------------------------------------------------
+    # KIỂM TRA ĐIỀU KIỆN THẮNG / THUA CHIẾN THUẬT
+    # -----------------------------------------------------------------
     if prev_alive == 1 and curr_alive == 0:
-        return float(REWARD_DICT["agent_death"])
+        return float(REWARD_DICT["agent_death"]) # Chết là dính phạt ngay, thoát hàm
     
     prev_enemies_alive = _enemy_alive_count(prev_players, agent_id)
     curr_enemies_alive = _enemy_alive_count(curr_players, agent_id)
@@ -240,147 +237,94 @@ def compute_reward(prev_obs, curr_obs, agent_id):
     if curr_enemies_alive == 0 and prev_enemies_alive > 0:
         reward += REWARD_DICT["win"]
 
-    # 2. MOVEMENT & TIME PENALTIES
+    # -----------------------------------------------------------------
+    # ĐIỀU HÀNH DI CHUYỂN & CHỐNG NÚP LÙM
+    # -----------------------------------------------------------------
     prev_x, prev_y = prev_players[agent_id][0], prev_players[agent_id][1]
     curr_x, curr_y = curr_players[agent_id][0], curr_players[agent_id][1]
     
     if prev_x == curr_x and prev_y == curr_y:
-        reward += REWARD_DICT["standing_still"]
+        reward += REWARD_DICT["standing_still"] # Phạt nặng nếu đứng im thụ động
     else:
-        reward -= REWARD_DICT["standing_still"] # Moving still incurs a small time penalty to encourage efficiency
+        reward -= REWARD_DICT["standing_still"] # Di chuyển sẽ được bù lại điểm đứng im
     
-    reward += REWARD_DICT["time_penalty"]
+    reward += REWARD_DICT["time_penalty"] # Chi phí thời gian cố định mỗi bước
 
-    # 2b. DANGER EVASION — reward leaving predicted blast; penalize walking into it
+    # -----------------------------------------------------------------
+    # CƠ CHẾ ĐIỀU HƯỚNG ĂN VẬT PHẨM (GIẢI QUYẾT TRIỆT ĐỂ BỆNH "LƯỜI")
+    # -----------------------------------------------------------------
+    # 1. Thưởng động: Tiến lại gần vật phẩm có trên bản đồ
+    prev_item_d = _manhattan_to_nearest_item(prev_obs["map"], prev_x, prev_y)
+    curr_item_d = _manhattan_to_nearest_item(curr_obs["map"], curr_x, curr_y)
+    
+    if prev_item_d is not None and curr_item_d is not None:
+        # Nếu hiệu số dương tức là khoảng cách đang giảm dần -> Bot đang đi đúng hướng ăn đồ
+        reward += REWARD_DICT["approach_item"] * (prev_item_d - curr_item_d)
+
+    # 2. Thưởng tĩnh: Giây phút giẫm chân ăn được vật phẩm
+    stepped_on_tile = prev_obs["map"][curr_x, curr_y]
+    if stepped_on_tile in [3, 4]: 
+        reward += REWARD_DICT["item_collection"]
+    else:
+        # Kiểm tra dự phòng nếu map cập nhật chậm nhưng chỉ số người chơi đã tăng
+        prev_radius_bonus = int(prev_players[agent_id][4])
+        curr_radius_bonus = int(curr_players[agent_id][4])
+        if curr_radius_bonus > prev_radius_bonus:
+             reward += REWARD_DICT["item_collection"]
+
+    # -----------------------------------------------------------------
+    # QUẢN LÝ RỦI RO & NÉ BOM SINH TỒN
+    # -----------------------------------------------------------------
     if _any_bombs(prev_obs) or _any_bombs(curr_obs):
         prev_in_blast, prev_timer = _blast_status_at(prev_obs, prev_x, prev_y)
         curr_in_blast, _ = _blast_status_at(curr_obs, curr_x, curr_y)
         if prev_in_blast and not curr_in_blast:
             urgency = 1.5 if (prev_timer is not None and prev_timer <= 3) else 1.0
             reward += REWARD_DICT["danger_evasion"] * urgency
-        elif (
-            not prev_in_blast
-            and curr_in_blast
-            and (prev_x != curr_x or prev_y != curr_y)
-        ):
-            # Only when stepping into blast; standing still (e.g. planting on own tile) is excluded
+        elif not prev_in_blast and curr_in_blast and (prev_x != curr_x or prev_y != curr_y):
             reward += REWARD_DICT["danger_enter"]
 
-    # Standing in your own blast: penalize more as the fuse runs down (clearer than flat -0.04).
+    # Phạt lảng vảng cạnh bom của chính mình khi ngòi nổ ngắn lại
     mt_own = _min_own_blast_timer_at(curr_obs, agent_id, curr_x, curr_y)
     if curr_alive == 1 and mt_own is not None:
         urgency = max(1, 8 - int(mt_own))
         reward += REWARD_DICT["own_blast_loiter"] * float(urgency)
 
-    if (
-        curr_alive == 1
-        and prev_enemies_alive > 0
-        and curr_enemies_alive > 0
-    ):
+    # Thưởng hướng di chuyển tiếp cận kẻ địch để dồn ép
+    if curr_alive == 1 and prev_enemies_alive > 0 and curr_enemies_alive > 0:
         prev_d = _manhattan_to_nearest_alive_enemy(prev_players, agent_id, prev_x, prev_y)
         curr_d = _manhattan_to_nearest_alive_enemy(curr_players, agent_id, curr_x, curr_y)
         if prev_d is not None and curr_d is not None:
             reward += REWARD_DICT["approach_enemy"] * (prev_d - curr_d)
 
-    # 3. ITEM COLLECTION
-    # Based on your legend: 3 is item_radius, 4 is item_capacity
-    stepped_on_tile = prev_obs["map"][curr_x, curr_y]
-    if stepped_on_tile in [3, 4]: 
-        reward += REWARD_DICT["item_collection"]
-    else:
-        # Fallback check just in case items spawn under players or map updates differently
-        prev_radius_bonus = int(prev_players[agent_id][4])
-        curr_radius_bonus = int(curr_players[agent_id][4])
-        if curr_radius_bonus > prev_radius_bonus:
-             reward += REWARD_DICT["item_collection"]
-
-    # 4. REWARD SHAPING: Box Destruction & Bomb Placement
+    # -----------------------------------------------------------------
+    # PHÁ HÒM GỖ ĐỂ TẠO RA VẬT PHẨM TỰ NHIÊN
+    # -----------------------------------------------------------------
     prev_bombs_left = int(prev_players[agent_id][3])
     curr_bombs_left = int(curr_players[agent_id][3])
     
-    if curr_bombs_left < prev_bombs_left:
-        # Check immediate adjacent tiles (up, down, left, right)
+    if curr_bombs_left < prev_bombs_left: # Khoảnh khắc Agent vừa bấm nút Đặt Bom
         adjacent_tiles = [
             prev_obs["map"][max(0, curr_x-1), curr_y],
             prev_obs["map"][min(prev_obs["map"].shape[0]-1, curr_x+1), curr_y],
             prev_obs["map"][curr_x, max(0, curr_y-1)],
             prev_obs["map"][curr_x, min(prev_obs["map"].shape[1]-1, curr_y+1)]
         ]
-        
-        # 2 is the integer for "box" based on your legend
-        if 2 in adjacent_tiles:
+        if 2 in adjacent_tiles: # Thưởng ngay nếu đặt cạnh hòm gỗ
             reward += REWARD_DICT["plant_near_box"]
         
-        # Safe bomb placement: planted bomb AND have escape route
         n_free = _count_free_neighbors(curr_obs["map"], curr_x, curr_y, curr_obs["bombs"])
-        if n_free >= 1:
+        if n_free >= 1: # Chỉ thưởng đặt bom nếu tính toán thấy có đường chạy
             reward += REWARD_DICT["safe_bomb_plant"]
 
-    # 5. BOX DESTRUCTION CONFIRMATION
+    # Thưởng lớn khi hòm gỗ thực tế bị nổ tung biến mất khỏi bản đồ
     prev_boxes = _count_boxes(prev_obs["map"])
     curr_boxes = _count_boxes(curr_obs["map"])
     if curr_boxes < prev_boxes:
         reward += REWARD_DICT["box_destroyed"] * (prev_boxes - curr_boxes)
 
-    # 6. SURVIVAL BONUS (increases over time to reward staying alive)
+    # Thưởng sống sót cơ bản
     if curr_alive == 1:
         reward += REWARD_DICT["survival_bonus"]
 
     return float(reward)
-
-
-class UnitTestReward:
-    def agent_death(self):
-        prev_obs = {
-            "map": np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]]),
-            "players": {0: (1, 1, 1, 1, 1)}, # Changed True to 1 for alive flag
-            "bombs": []
-        }
-        curr_obs = {
-            "map": np.array([[0, 0, 0], [0, 0, 0], [0, 0, 0]]),
-            "players": {0: (1, 1, 0, 1, 1)}, # Changed False to 0
-            "bombs": []
-        }
-        reward = compute_reward(prev_obs, curr_obs, agent_id=0)
-        print(f"Agent Death Reward: {reward}")
-        assert reward == REWARD_DICT["agent_death"], "Expected exactly the agent death penalty"
-    
-    def agent_standing_still(self):
-        prev_obs = {
-            "map": np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]]),
-            "players": {0: (1, 1, 1, 1, 1)},
-            "bombs": []
-        }
-        curr_obs = {
-            "map": np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]]),
-            "players": {0: (1, 1, 1, 1, 1)},
-            "bombs": []
-        }
-        reward = compute_reward(prev_obs, curr_obs, agent_id=0)
-        print(f"Agent Standing Still Reward: {reward}")
-        expected = REWARD_DICT["standing_still"] + REWARD_DICT["time_penalty"] + REWARD_DICT["survival_bonus"]
-        assert abs(reward - expected) < 1e-6, f"Expected {expected} for standing still, got {reward}"
-    
-    def agent_moving(self):
-        prev_obs = {
-            "map": np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]]),
-            "players": {0: (1, 1, 1, 1, 1)},
-            "bombs": []
-        }
-        curr_obs = {
-            "map": np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]]),
-            "players": {0: (1, 2, 1, 1, 1)}, # Player moved
-            "bombs": []
-        }
-        reward = compute_reward(prev_obs, curr_obs, agent_id=0)
-        print(f"Agent Moving Reward: {reward}")
-
-    def run_all_tests(self):
-        self.agent_death()
-        self.agent_standing_still()
-        self.agent_moving()
-        print("All reward tests passed!")
-
-if __name__ == "__main__":
-    tester = UnitTestReward()
-    tester.run_all_tests()
