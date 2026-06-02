@@ -1,7 +1,12 @@
-"""Enhanced observation encoding for Bomberland DQN v2.
+"""Enhanced observation encoding for Bomberland DQN v2 — Conditional RL.
 
-Produces 13 spatial channels + 7 auxiliary scalars (vs. original 9+3).
+Produces 13 spatial channels + 9 auxiliary scalars.
 New channels: blast zone prediction, danger heatmap, box adjacency, BFS reachability.
+Continuous multi-factor conditioning signals:
+  - hunting_urgency ∈ [0,1]: f(bombs_ratio, power_ratio, enemy_proximity)
+  - farming_urgency ∈ [0,1]: f(bombs_deficit, resource_density, safety_margin)
+These two signals are INDEPENDENT (don't sum to 1), allowing the network
+to learn nuanced strategies when both signals are simultaneously high/low.
 """
 import numpy as np
 from collections import deque
@@ -33,7 +38,13 @@ def _blast_tiles(grid, bx, by, radius):
 
 
 def encode_obs(obs, agent_ids):
-    """Encode observation into (13, H, W) map tensor + (7,) auxiliary vector."""
+    """Encode observation into (13, H, W) map tensor + (9,) auxiliary vector.
+
+    The last 2 scalars are continuous multi-factor conditioning signals:
+      - hunting_urgency ∈ [0,1]: high bombs + high power + enemy nearby
+      - farming_urgency ∈ [0,1]: low bombs + resources available + safe position
+    These are INDEPENDENT (can both be high or both be low simultaneously).
+    """
     if obs is None:
         raise ValueError("obs should not be None")
 
@@ -130,14 +141,41 @@ def encode_obs(obs, agent_ids):
 
     map_feat = np.stack(chs, axis=0)  # (13, H, W)
 
+    # --- Continuous Multi-Factor Conditioning ---
+    bombs_left = int(players[uid][3])
+    bombs_ratio = float(bombs_left) / max(_Player.MAX_BOMB_CAPACITY, 1)
+    power_ratio = float(players[uid][4]) / max(_Player.MAX_BOMB_RADIUS, 1)
+    enemy_proximity = 1.0 - (min_dist / 24.0) if my_alive and n_alive > 0 else 0.0
+
+    # hunting_urgency: high when well-armed + enemy is close
+    hunting_urgency = (
+        0.50 * bombs_ratio +
+        0.20 * power_ratio +
+        0.30 * enemy_proximity
+    )
+
+    # farming_urgency: high when low on bombs + resources available + safe
+    n_items = float(np.sum((grid == _Map.ITEM_RADIUS) | (grid == _Map.ITEM_CAPACITY)))
+    n_boxes = float(np.sum(grid == _Map.BOX))
+    resource_density = min((n_items + n_boxes * 0.3) / 10.0, 1.0)
+    safety_margin = 1.0 - in_blast  # safe = 1, in danger = 0
+
+    farming_urgency = (
+        0.50 * (1.0 - bombs_ratio) +
+        0.30 * resource_density +
+        0.20 * safety_margin
+    )
+
     scalar = np.array([
-        float(players[uid][3]) / _Player.MAX_BOMB_CAPACITY,
-        float(players[uid][4]) / _Player.MAX_BOMB_RADIUS,
+        bombs_ratio,
+        power_ratio,
         n_alive / max(len(opp_ids), 1),
         min_dist / 24.0,
         in_blast,
         n_bombs / 10.0,
         float(my_alive),
+        hunting_urgency,    # Continuous goal-condition: aggression level
+        farming_urgency,    # Continuous goal-condition: economy/survival level
     ], dtype=np.float32)
 
     return map_feat, scalar

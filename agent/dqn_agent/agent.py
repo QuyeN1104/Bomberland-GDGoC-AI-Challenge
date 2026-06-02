@@ -250,7 +250,7 @@ class Agent:
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "1509611_global_step.pth"
+        ckpt_path = Path(__file__).parent / "155303_global_step.pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:
