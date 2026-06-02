@@ -30,25 +30,29 @@ class Agent:
 
 ## Local Training (Kaggle)
 
-Follow the provided steps to train DQN on Kaggle Platform: 
+Follow the provided steps to train DQN v2 on Kaggle Platform: 
 1. Get github access token from github.com > Settings > Developer settings > Personal Access Tokens > Generate new token > Choose scope for the key (allow read repo) > Copy the key
 2. Create a new notebook on kaggle and add to Settings > Secrets > Key: any name for the key such as "dqn", Value: Paste the key here
-3. Paste the following code in 4 cells:
+3. **Important**: In Kaggle notebook Settings, set Accelerator to **GPU T4 x2** or **GPU P100** for faster training.
+4. Paste the following code in 5 cells:
 ```
 # Cell 1: Get token based on the key in Step 2
 from kaggle_secrets import UserSecretsClient
 user_secrets = UserSecretsClient()
 secret_value_0 = user_secrets.get_secret("dqn") 
 
-# Cell 2: Change the "your github username here"
-!git clone https://{your github username here}:{secret_value_0}@github.com/VLTisME/Bomberland-GDGoC-AI-Challenge.git
+# Cell 2: Clone your fork
+!git clone https://QuyeN1104:{secret_value_0}@github.com/QuyeN1104/Bomberland-GDGoC-AI-Challenge.git
 
 # Cell 3: Inspect to see any error
 %cd /kaggle/working/Bomberland-GDGoC-AI-Challenge
 %ls
 
-# Cell 4: Train 10000 episodes versus a tactical baseline agent
-!python /kaggle/working/Bomberland-GDGoC-AI-Challenge/agent/dqn_agent/agent.py --enemy_type tactical --num_episodes 10000 --save_model
+# Cell 4: Install dependencies
+!pip install -q torch numpy tqdm matplotlib
+
+# Cell 5: Train DQN v2 — 5000 episodes vs tactical agent (GPU accelerated)
+!python /kaggle/working/Bomberland-GDGoC-AI-Challenge/agent/dqn_agent/agent.py --enemy_type tactical --num_episodes 5000 --save_model
 ```
 
 **Tips**: To successfully submit your RL-based agent:

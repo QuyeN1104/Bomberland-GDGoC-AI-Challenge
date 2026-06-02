@@ -250,7 +250,7 @@ class Agent:
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "2737502_global_step.pth"
+        ckpt_path = Path(__file__).parent / "1509611_global_step.pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:
@@ -264,10 +264,11 @@ class Agent:
         ms = tuple(spec[0])
         ad = int(spec[1])
         na = ckpt["num_actions"]
-        noisy = ckpt.get("noisy", False)
+        # Auto-detect noisy from state_dict keys (weight_mu → NoisyLinear)
+        has_noisy_keys = "value.0.weight_mu" in ckpt["model_state_dict"]
+        noisy = ckpt.get("noisy", has_noisy_keys)
         # Detect old vs new architecture
-        if "value.0.weight_mu" in ckpt["model_state_dict"] or \
-           "value.0.weight" in ckpt["model_state_dict"]:
+        if has_noisy_keys or "value.0.weight" in ckpt["model_state_dict"]:
             self.q_net = DuelingDQN(ms, ad, na, noisy=noisy)
         else:
             # Fallback: load old DQNModel for backward compat

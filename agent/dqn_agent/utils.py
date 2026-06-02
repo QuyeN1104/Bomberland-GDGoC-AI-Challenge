@@ -23,7 +23,7 @@ def seed_everything(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-def save_model_fn(model, optimizer, global_step, epsilon, lr, input_spec, num_actions, path):
+def save_model_fn(model, optimizer, global_step, epsilon, lr, input_spec, num_actions, path, noisy=True):
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -34,6 +34,7 @@ def save_model_fn(model, optimizer, global_step, epsilon, lr, input_spec, num_ac
         "input_shape": input_spec,
         "input_spec": input_spec,
         "num_actions": num_actions,
+        "noisy": noisy,
     }
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(checkpoint, path)
