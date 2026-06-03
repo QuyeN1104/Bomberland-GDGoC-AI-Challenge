@@ -172,6 +172,10 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
 
     loss_hist, rew_hist, win_hist = [], [], []
 
+    best_moving_avg = -float('inf')
+    save_folder = f"ckpts/dqnv2_{enemy_type}_{num_episodes}ep_{seed}s"
+    Path(save_folder).mkdir(parents=True, exist_ok=True) # Đảm bảo thư mục tồn tại
+
     with tqdm(total=num_episodes, desc="Training DQN v2") as pbar:
         for ep in range(num_episodes):
             obs = env.reset(seed=seed + ep)
@@ -213,12 +217,24 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
             pbar.update(1)
             pbar.set_postfix(R=f"{total_r:.1f}", step=agent.global_step)
 
+            if save_model:
+                # 1. Lưu backup mỗi 10 episodes (để lỡ crash thì load lại từ đây)
+                if (ep + 1) % 10 == 0:
+                    latest_path = f"{save_folder}/latest_checkpoint.pth"
+                    save_model_fn(agent.q_net, agent.optimizer, agent.global_step,
+                                  0.0, agent.lr, input_spec, n_actions, latest_path)
+                
+                current_ma = np.mean(rew_hist[-10:]) if len(rew_hist) >= 10 else total_r
+                
+                if current_ma > best_moving_avg and ep > 5:
+                    best_moving_avg = current_ma
+                    best_path = f"{save_folder}/best_model.pth"
+                    save_model_fn(agent.q_net, agent.optimizer, agent.global_step,
+                                  0.0, agent.lr, input_spec, n_actions, best_path)
+
     tag = f"dqnv2_{enemy_type}_{num_episodes}ep_{seed}s"
     folder = f"ckpts/{tag}"
-    if save_model:
-        path = f"{folder}/{agent.global_step}_global_step.pth"
-        save_model_fn(agent.q_net, agent.optimizer, agent.global_step,
-                      0.0, agent.lr, input_spec, n_actions, path)
+  
     plot_loss(loss_hist, save_path=f"{folder}/{tag}_loss.png")
     plot_rewards(rew_hist, save_path=f"{folder}/{tag}_rewards.png")
     plot_win_rates(win_hist, save_path=f"{folder}/{tag}_winrates.png")
@@ -250,7 +266,7 @@ class Agent:
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "155303_global_step.pth"
+        ckpt_path = Path(__file__).parent / "152116_global_step.pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:
