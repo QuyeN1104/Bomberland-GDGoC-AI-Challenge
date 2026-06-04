@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 class NoisyLinear(nn.Module):
     """Factorised Gaussian NoisyNet layer (Fortunato et al., 2018)."""
-    def __init__(self, in_features, out_features, std_init=0.5):
+    def __init__(self, in_features, out_features, std_init=0.7):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features

@@ -29,33 +29,35 @@ _DEFAULT_BOMB_OWNER = 0
 REWARD_DICT = {
     # Điều kiện kết thúc trận đấu (Terminal)
     "win": 3.0,                  # Thưởng tối cao khi là người duy nhất sống sót
-    "enemy_death": 2.0,          # Kích thích đặt bom bẫy chết đối thủ
+    "enemy_death": 2.5,          # ↑ Tăng mạnh để agent muốn giết địch hơn
     "agent_death": -2.5,         # Hình phạt nặng để tránh việc tự sát bừa bãi
 
     # Di chuyển & Chống núp lùm thụ động
     "standing_still": -0.05,      # Phạt nặng khi đứng im một chỗ để triệt tiêu hành vi camping
     "time_penalty": -0.005,       # Chi phí thời gian trên mỗi bước đi để ép di chuyển nhanh
 
-    # Chiến đấu chiến thuật (Khai thác thuật toán của Tactical Agent)
-    "plant_near_box": 0.15,       # Thưởng đặt bom cạnh hòm gỗ để mở đường
-    "box_destroyed": 0.35,        # Thưởng lớn khi hòm gỗ thực sự bị nổ tung biến mất
-    "safe_bomb_plant": 0.15,      # Thưởng khi đặt bom ở vị trí có thuật toán BFS xác nhận có lối thoát
-    "suicide_bomb_plant": -1.50,  # PHẠT CỰC NẶNG nếu đặt bom tự nhốt mình vào góc chết (Chặn đứng từ trong trứng)
-    "chain_bomb_plant": 0.60,     # THƯỞNG CAO khi đặt bom tạo chuỗi nổ lan (blast chạm bomb khác)
+    # Chiến đấu chiến thuật — ĐÃ TĂNG MẠNH để khuyến khích đặt bom
+    "bomb_plant_base": 0.20,      # ★ MỚI: Thưởng cơ bản cho BẤT KỲ lần đặt bom nào (dù ở đâu)
+    "plant_near_box": 0.30,       # ↑ 0.15→0.30: Thưởng đặt bom cạnh hòm gỗ để mở đường
+    "plant_near_enemy": 0.50,     # ★ MỚI: Thưởng đặt bom khi có kẻ địch trong blast zone
+    "box_destroyed": 0.60,        # ↑ 0.35→0.60: Thưởng lớn khi hòm gỗ thực sự bị nổ tung
+    "safe_bomb_plant": 0.60,      # ↑ 0.35→0.60: Thưởng khi BFS xác nhận có lối thoát
+    "suicide_bomb_plant": -0.80,  # ↓ -1.50→-0.80: Giảm penalty để agent bớt sợ đặt bom
+    "chain_bomb_plant": 0.80,     # ↑ 0.60→0.80: Thưởng chuỗi nổ lan
 
-    # Kinh tế & Sự thèm khát Vật phẩm (Item Economy)
-    "item_collection": 0.60,      # Thưởng đột biến khi giẫm chân ăn được vật phẩm
-    "approach_item": 0.05,        # Thưởng động trên từng bước nếu khoảng cách tới vật phẩm ngắn lại
-    "item_compete_bonus": 0.10,   # Thưởng khi agent gần item hơn đối thủ (cướp đồ trước mũi)
+    # Kinh tế & Sự thèm khát Vật phẩm — TĂNG để agent chủ động ăn đồ
+    "item_collection": 0.80,      # ↑ 0.60→0.80: Thưởng đột biến khi ăn được vật phẩm
+    "approach_item": 0.08,        # ↑ 0.05→0.08: Thưởng tiếp cận item mạnh hơn
+    "item_compete_bonus": 0.15,   # ↑ 0.10→0.15: Thưởng cướp đồ trước mũi đối thủ
     "survival_bonus": 0.001,      # Thưởng sống sót siêu nhỏ
 
     # Nhận biết nguy hiểm toàn cục
-    "danger_evasion": 0.20,       # Thưởng lớn khi né thoát ra khỏi vùng chữ thập nguy hiểm của bom
+    "danger_evasion": 0.20,       # Thưởng lớn khi né thoát ra khỏi vùng nguy hiểm
     "danger_enter": -0.10,        # Phạt khi tự ý lao đầu vào vùng bom sắp nổ
     "own_blast_loiter": -0.05,    # Phạt lảng vảng cạnh bom của mình khi ngòi nổ ngắn lại
 
     # Định vị không gian
-    "approach_enemy": 0.025,      # Thưởng tiến lại gần để dồn ép đối thủ
+    "approach_enemy": 0.04,       # ↑ 0.025→0.04: Thưởng tiến lại gần dồn ép đối thủ
 }
 
 # =====================================================================
@@ -437,6 +439,9 @@ def compute_reward(prev_obs, curr_obs, agent_id):
     prev_bombs_left = int(prev_players[agent_id][3])
 
     if curr_bombs_left < prev_bombs_left:  # Giây phút nút ĐẶT BOM được bấm
+        # ★ THƯỞNG CƠ BẢN: Bất kỳ lần đặt bom nào cũng được thưởng nhẹ
+        reward += REWARD_DICT["bomb_plant_base"]
+
         # Gom danh sách đối thủ còn sống để làm chướng ngại vật trong BFS
         enemies_set = {(int(p[0]), int(p[1])) for i, p in enumerate(prev_players) if i != agent_id and p[2] == 1}
         my_radius = _bomb_radius_from_obs(prev_players, agent_id)
@@ -457,6 +462,14 @@ def compute_reward(prev_obs, curr_obs, agent_id):
             if BOX in adjacent_cells:
                 reward += REWARD_DICT["plant_near_box"]
 
+            # ★ MỚI: Thưởng đặt bom gần kẻ địch (blast zone chạm vị trí enemy)
+            my_blast = _explosion_tiles_for_bomb(prev_obs["map"], curr_x, curr_y, my_radius)
+            enemy_in_blast = sum(1 for epos in enemies_set if epos in my_blast)
+            if enemy_in_blast > 0:
+                plant_enemy_reward = REWARD_DICT["plant_near_enemy"] * enemy_in_blast
+                plant_enemy_reward *= (1.0 + 1.0 * hunt_w)  # [1x → 2x] hunting mode
+                reward += plant_enemy_reward
+
             # ── CHAIN BOMB: Thưởng chuỗi nổ lan ──
             chain_count = _detect_chain_bomb(
                 prev_obs["map"], prev_players,
@@ -469,7 +482,7 @@ def compute_reward(prev_obs, curr_obs, agent_id):
                 chain_reward *= (1.0 + 1.0 * hunt_w)  # [1x → 2x] ở hunting mode
                 reward += chain_reward
         else:
-            reward += REWARD_DICT["suicide_bomb_plant"]  # ĐẶT BOM TỰ SÁT -> PHẠT NẶNG NGAY, KHÔNG CHỜ CHẾT
+            reward += REWARD_DICT["suicide_bomb_plant"]  # Đặt bom tự sát → phạt (đã giảm nhẹ)
 
     # Ghi nhận thành quả phá hòm thực tế sau vụ nổ
     prev_boxes = int(np.sum(prev_obs["map"] == BOX))
