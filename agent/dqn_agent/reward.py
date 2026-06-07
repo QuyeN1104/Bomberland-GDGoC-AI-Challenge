@@ -33,23 +33,23 @@ REWARD_DICT = {
     "agent_death": -2.5,         # Hình phạt nặng để tránh việc tự sát bừa bãi
 
     # Di chuyển & Chống núp lùm thụ động
-    "standing_still": -0.05,      # Phạt nặng khi đứng im một chỗ để triệt tiêu hành vi camping
-    "time_penalty": -0.005,       # Chi phí thời gian trên mỗi bước đi để ép di chuyển nhanh
+    "standing_still": -0.3,      # Phạt nặng khi đứng im một chỗ để triệt tiêu hành vi camping
+    "time_penalty": -0.1,       # Chi phí thời gian trên mỗi bước đi để ép di chuyển nhanh
 
     # Chiến đấu chiến thuật — ĐÃ TĂNG MẠNH để khuyến khích đặt bom
-    "bomb_plant_base": 0.20,      # ★ MỚI: Thưởng cơ bản cho BẤT KỲ lần đặt bom nào (dù ở đâu)
-    "plant_near_box": 0.30,       # ↑ 0.15→0.30: Thưởng đặt bom cạnh hòm gỗ để mở đường
+    "bomb_plant_base": 0.30,      # ★ MỚI: Thưởng cơ bản cho BẤT KỲ lần đặt bom nào (dù ở đâu)
+    "plant_near_box": 0.40,       # ↑ 0.15→0.30: Thưởng đặt bom cạnh hòm gỗ để mở đường
     "plant_near_enemy": 0.50,     # ★ MỚI: Thưởng đặt bom khi có kẻ địch trong blast zone
-    "box_destroyed": 0.60,        # ↑ 0.35→0.60: Thưởng lớn khi hòm gỗ thực sự bị nổ tung
-    "safe_bomb_plant": 0.60,      # ↑ 0.35→0.60: Thưởng khi BFS xác nhận có lối thoát
-    "suicide_bomb_plant": -0.80,  # ↓ -1.50→-0.80: Giảm penalty để agent bớt sợ đặt bom
+    "box_destroyed": 0.80,        # ↑ 0.35→0.60: Thưởng lớn khi hòm gỗ thực sự bị nổ tung
+    "safe_bomb_plant": 0.70,      # ↑ 0.35→0.60: Thưởng khi BFS xác nhận có lối thoát
+    "suicide_bomb_plant": -0.60,  # ↓ -1.50→-0.80: Giảm penalty để agent bớt sợ đặt bom
     "chain_bomb_plant": 0.80,     # ↑ 0.60→0.80: Thưởng chuỗi nổ lan
 
     # Kinh tế & Sự thèm khát Vật phẩm — TĂNG để agent chủ động ăn đồ
-    "item_collection": 0.80,      # ↑ 0.60→0.80: Thưởng đột biến khi ăn được vật phẩm
-    "approach_item": 0.08,        # ↑ 0.05→0.08: Thưởng tiếp cận item mạnh hơn
-    "item_compete_bonus": 0.15,   # ↑ 0.10→0.15: Thưởng cướp đồ trước mũi đối thủ
-    "survival_bonus": 0.001,      # Thưởng sống sót siêu nhỏ
+    "item_collection": 0.90,      # ↑ 0.60→0.80: Thưởng đột biến khi ăn được vật phẩm
+    "approach_item": 0.15,        # ↑ 0.05→0.08: Thưởng tiếp cận item mạnh hơn
+    "item_compete_bonus": 0.20,   # ↑ 0.10→0.15: Thưởng cướp đồ trước mũi đối thủ
+    "survival_bonus": 0.01,      # Thưởng sống sót siêu nhỏ
 
     # Nhận biết nguy hiểm toàn cục
     "danger_evasion": 0.20,       # Thưởng lớn khi né thoát ra khỏi vùng nguy hiểm
@@ -57,7 +57,7 @@ REWARD_DICT = {
     "own_blast_loiter": -0.05,    # Phạt lảng vảng cạnh bom của mình khi ngòi nổ ngắn lại
 
     # Định vị không gian
-    "approach_enemy": 0.04,       # ↑ 0.025→0.04: Thưởng tiến lại gần dồn ép đối thủ
+    "approach_enemy": 0.08,       # ↑ 0.025→0.04: Thưởng tiến lại gần dồn ép đối thủ
 }
 
 # =====================================================================
