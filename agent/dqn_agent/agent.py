@@ -301,7 +301,7 @@ class Agent:
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "best_model (2).pth"
+        ckpt_path = Path(__file__).parent / "latest_checkpoint (1).pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:

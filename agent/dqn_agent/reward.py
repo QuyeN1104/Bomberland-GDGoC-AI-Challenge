@@ -42,7 +42,7 @@ REWARD_DICT = {
     "plant_near_enemy": 0.50,     # ★ MỚI: Thưởng đặt bom khi có kẻ địch trong blast zone
     "box_destroyed": 0.80,        # ↑ 0.35→0.60: Thưởng lớn khi hòm gỗ thực sự bị nổ tung
     "safe_bomb_plant": 0.70,      # ↑ 0.35→0.60: Thưởng khi BFS xác nhận có lối thoát
-    "suicide_bomb_plant": -0.60,  # ↓ -1.50→-0.80: Giảm penalty để agent bớt sợ đặt bom
+    "suicide_bomb_plant": -0.80,  # ↓ -1.50→-0.80: Giảm penalty để agent bớt sợ đặt bom
     "chain_bomb_plant": 0.80,     # ↑ 0.60→0.80: Thưởng chuỗi nổ lan
 
     # Kinh tế & Sự thèm khát Vật phẩm — TĂNG để agent chủ động ăn đồ
