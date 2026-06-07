@@ -33,8 +33,8 @@ REWARD_DICT = {
     "agent_death": -2.5,         # Hình phạt nặng để tránh việc tự sát bừa bãi
 
     # Di chuyển & Chống núp lùm thụ động
-    "standing_still": -0.3,      # Phạt nặng khi đứng im một chỗ để triệt tiêu hành vi camping
-    "time_penalty": -0.1,       # Chi phí thời gian trên mỗi bước đi để ép di chuyển nhanh
+    "standing_still": -0.1,      # Phạt nặng khi đứng im một chỗ để triệt tiêu hành vi camping
+    "time_penalty": -0.03,       # Chi phí thời gian trên mỗi bước đi để ép di chuyển nhanh
 
     # Chiến đấu chiến thuật — ĐÃ TĂNG MẠNH để khuyến khích đặt bom
     "bomb_plant_base": 0.30,      # ★ MỚI: Thưởng cơ bản cho BẤT KỲ lần đặt bom nào (dù ở đâu)
@@ -46,7 +46,7 @@ REWARD_DICT = {
     "chain_bomb_plant": 0.80,     # ↑ 0.60→0.80: Thưởng chuỗi nổ lan
 
     # Kinh tế & Sự thèm khát Vật phẩm — TĂNG để agent chủ động ăn đồ
-    "item_collection": 0.90,      # ↑ 0.60→0.80: Thưởng đột biến khi ăn được vật phẩm
+    "item_collection": 1,      # ↑ 0.60→0.80: Thưởng đột biến khi ăn được vật phẩm
     "approach_item": 0.15,        # ↑ 0.05→0.08: Thưởng tiếp cận item mạnh hơn
     "item_compete_bonus": 0.20,   # ↑ 0.10→0.15: Thưởng cướp đồ trước mũi đối thủ
     "survival_bonus": 0.01,      # Thưởng sống sót siêu nhỏ
@@ -57,7 +57,7 @@ REWARD_DICT = {
     "own_blast_loiter": -0.05,    # Phạt lảng vảng cạnh bom của mình khi ngòi nổ ngắn lại
 
     # Định vị không gian
-    "approach_enemy": 0.08,       # ↑ 0.025→0.04: Thưởng tiến lại gần dồn ép đối thủ
+    "approach_enemy": 0.10,       # ↑ 0.025→0.04: Thưởng tiến lại gần dồn ép đối thủ
 }
 
 # =====================================================================
