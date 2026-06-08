@@ -400,6 +400,10 @@ def compute_reward(prev_obs, curr_obs, agent_id):
     prev_x, prev_y = int(prev_players[agent_id][0]), int(prev_players[agent_id][1])
     curr_x, curr_y = int(curr_players[agent_id][0]), int(curr_players[agent_id][1])
 
+    # Lấy thông tin vùng nguy hiểm toàn cục (phải tính TRƯỚC khi dùng)
+    danger_soon_prev, danger_now_prev = _get_danger_tiles(prev_obs["map"], prev_obs["bombs"], prev_players)
+    danger_soon_curr, _ = _get_danger_tiles(curr_obs["map"], curr_obs["bombs"], curr_players)
+
     # -----------------------------------------------------------------
     # CHỐNG NÚP LÙM THỤ ĐỘNG (giảm penalty khi đang trong danger zone)
     # -----------------------------------------------------------------
@@ -415,10 +419,6 @@ def compute_reward(prev_obs, curr_obs, agent_id):
     # ── Smooth: time_penalty [1x → 2x] ──
     time_pen = REWARD_DICT["time_penalty"] * (1.0 + 1.0 * hunt_w)
     reward += time_pen
-
-    # Lấy thông tin vùng nguy hiểm toàn cục từ thuật toán hình học của Baseline
-    danger_soon_prev, danger_now_prev = _get_danger_tiles(prev_obs["map"], prev_obs["bombs"], prev_players)
-    danger_soon_curr, _ = _get_danger_tiles(curr_obs["map"], curr_obs["bombs"], curr_players)
 
     # -----------------------------------------------------------------
     # CƠ CHẾ ĐIỀU HƯỚNG ĂN VẬT PHẨM (MẮT THẦN TOÀN CỤC)
