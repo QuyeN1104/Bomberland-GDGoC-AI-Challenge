@@ -27,37 +27,41 @@ _DEFAULT_BOMB_OWNER = 0
 # 1. BẢNG CẤU HÌNH PHẦN THƯỞNG (HYBRID REWARD MATRIX)
 # =====================================================================
 REWARD_DICT = {
-    # Điều kiện kết thúc trận đấu (Terminal)
-    "win": 3.0,                  # Thưởng tối cao khi là người duy nhất sống sót
-    "enemy_death": 2.5,          # ↑ Tăng mạnh để agent muốn giết địch hơn
-    "agent_death": -2.5,         # Hình phạt nặng để tránh việc tự sát bừa bãi
+    # ── Terminal: Death penalty PHẢI áp đảo mọi combo thưởng đặt bom ──
+    "win": 5.0,                  # ↑ 3.0→5.0: Thưởng chiến thắng phải là mục tiêu tối thượng
+    "enemy_death": 2.5,          # Giữ nguyên
+    "agent_death": -5.0,         # ↑↑ -2.5→-5.0: PHẢI lớn hơn tổng combo bomb (~2.0)
 
-    # Di chuyển & Chống núp lùm thụ động
-    "standing_still": -0.1,      # Phạt nặng khi đứng im một chỗ để triệt tiêu hành vi camping
-    "time_penalty": -0.03,       # Chi phí thời gian trên mỗi bước đi để ép di chuyển nhanh
+    # ── Di chuyển & Chống núp lùm ──
+    "standing_still": -0.05,     # ↓ -0.10→-0.05: Giảm để agent có thể suy nghĩ khi trong danger
+    "time_penalty": -0.02,       # ↓ -0.03→-0.02: Giảm nhẹ noise nền
 
-    # Chiến đấu chiến thuật — ĐÃ TĂNG MẠNH để khuyến khích đặt bom
-    "bomb_plant_base": 0.30,      # ★ MỚI: Thưởng cơ bản cho BẤT KỲ lần đặt bom nào (dù ở đâu)
-    "plant_near_box": 0.40,       # ↑ 0.15→0.30: Thưởng đặt bom cạnh hòm gỗ để mở đường
-    "plant_near_enemy": 0.50,     # ★ MỚI: Thưởng đặt bom khi có kẻ địch trong blast zone
-    "box_destroyed": 0.80,        # ↑ 0.35→0.60: Thưởng lớn khi hòm gỗ thực sự bị nổ tung
-    "safe_bomb_plant": 0.70,      # ↑ 0.35→0.60: Thưởng khi BFS xác nhận có lối thoát
-    "suicide_bomb_plant": -0.80,  # ↓ -1.50→-0.80: Giảm penalty để agent bớt sợ đặt bom
-    "chain_bomb_plant": 0.80,     # ↑ 0.60→0.80: Thưởng chuỗi nổ lan
+    # ── Chiến đấu — GIẢM để không lấn át death penalty ──
+    "bomb_plant_base": 0.05,     # ↓ 0.10→0.05: Thưởng nhẹ cho hành vi đặt bom
+    "plant_near_box": 0.20,      # ↓ 0.40→0.20: Giảm để tổng stack không quá cao
+    "plant_near_enemy": 0.30,    # ↓ 0.50→0.30: Giảm nhưng vẫn khuyến khích
+    "box_destroyed": 0.60,       # ↓ 0.80→0.60: Thưởng thực tế khi phá hòm
+    "safe_bomb_plant": 0.30,     # ↓ 0.70→0.30: Giảm mạnh — tránh stack quá cao
+    "suicide_bomb_plant": -2.0,  # ↑↑ -0.80→-2.0: PHẢI phạt nặng đặt bom tự sát
+    "chain_bomb_plant": 0.50,    # ↓ 0.80→0.50: Giảm nhẹ
 
-    # Kinh tế & Sự thèm khát Vật phẩm — TĂNG để agent chủ động ăn đồ
-    "item_collection": 1,      # ↑ 0.60→0.80: Thưởng đột biến khi ăn được vật phẩm
-    "approach_item": 0.15,        # ↑ 0.05→0.08: Thưởng tiếp cận item mạnh hơn
-    "item_compete_bonus": 0.20,   # ↑ 0.10→0.15: Thưởng cướp đồ trước mũi đối thủ
-    "survival_bonus": 0.01,      # Thưởng sống sót siêu nhỏ
+    # ── ★ MỚI: Post-Bomb Escape — Cơ chế né bom sau khi đặt ──
+    "post_bomb_escape": 0.40,    # ★ Thưởng LỚN khi thoát blast zone bom mình vừa đặt
+    "post_bomb_linger": -0.15,   # ★ Phạt LEO THANG mỗi step còn trong blast zone bom mình
 
-    # Nhận biết nguy hiểm toàn cục
-    "danger_evasion": 0.20,       # Thưởng lớn khi né thoát ra khỏi vùng nguy hiểm
-    "danger_enter": -0.10,        # Phạt khi tự ý lao đầu vào vùng bom sắp nổ
-    "own_blast_loiter": -0.05,    # Phạt lảng vảng cạnh bom của mình khi ngòi nổ ngắn lại
+    # ── Kinh tế & Vật phẩm ──
+    "item_collection": 0.80,     # ↓ 1.0→0.80: Giảm nhẹ
+    "approach_item": 0.10,       # ↓ 0.15→0.10
+    "item_compete_bonus": 0.15,  # ↓ 0.20→0.15
+    "survival_bonus": 0.02,      # ↑ 0.01→0.02: Tăng nhẹ thưởng sống sót
 
-    # Định vị không gian
-    "approach_enemy": 0.10,       # ↑ 0.025→0.04: Thưởng tiến lại gần dồn ép đối thủ
+    # ── Nhận biết nguy hiểm — TĂNG MẠNH ──
+    "danger_evasion": 0.40,      # ↑↑ 0.20→0.40: Thưởng mạnh khi né thoát vùng nguy hiểm
+    "danger_enter": -0.20,       # ↑ -0.10→-0.20: Phạt mạnh hơn khi lao vào danger
+    "own_blast_loiter": -0.10,   # ↑ -0.05→-0.10: Phạt mạnh hơn khi lảng vảng cạnh bom mình
+
+    # ── Định vị không gian ──
+    "approach_enemy": 0.08,      # ↓ 0.10→0.08: Giảm nhẹ
 }
 
 # =====================================================================
@@ -126,24 +130,27 @@ def _get_danger_tiles(grid, bombs, players):
     return danger_soon, danger_now
 
 
-def _can_escape_after_placing_bfs(grid, my_pos, occupied_enemies, danger_soon, bomb_radius):
+def _can_escape_after_placing_bfs(grid, my_pos, occupied_enemies, danger_soon, bomb_radius,
+                                   bomb_timer=_DEFAULT_BOMB_TIMER):
     """
-    THUẬT TOÁN ĐẮT GIÁ TỪ TACTICAL AGENT:
-    Giả lập đặt bom tại chỗ và chạy thử thuật toán BFS xem có tìm được đường sống hay không.
+    THUẬT TOÁN ĐẮT GIÁ TỪ TACTICAL AGENT (CẢI TIẾN v2):
+    Giả lập đặt bom tại chỗ và chạy BFS xem có KỊP thoát trước khi nổ không.
+    v2: depth limit = min(timer - 1, 8) thay vì cố định 8.
     """
     # 1. Tự vẽ vụ nổ giả định của quả bom mình định đặt tại vị trí hiện tại
     my_blast = _explosion_tiles_for_bomb(grid, my_pos[0], my_pos[1], bomb_radius)
     # Vùng nguy hiểm hỗn hợp = Bom hiện có trên sân + Quả bom mình định đặt
     combined_danger = set(danger_soon) | my_blast
 
-    # 2. Chạy thuật toán BFS tìm ô an toàn nằm ngoài vùng nguy hiểm
+    # 2. BFS với depth limit = timer - 1 (phải thoát TRƯỚC khi nổ)
+    max_depth = min(bomb_timer - 1, 8)
     q = deque([(my_pos, 0)])
     seen = {my_pos}
     while q:
         pos, depth = q.popleft()
         if pos not in combined_danger and depth > 0:
-            return True  # Tìm thấy lối thoát an toàn thành công!
-        if depth >= 8:  # Giới hạn tìm kiếm 8 bước để tối ưu thời gian tính toán
+            return True  # Tìm thấy lối thoát an toàn VÀ kịp thời gian!
+        if depth >= max_depth:
             continue
         for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             nx, ny = pos[0] + dx, pos[1] + dy
@@ -304,6 +311,38 @@ def _min_own_blast_timer_at(obs, agent_id, x, y):
     return best
 
 
+def _get_own_blast_zone(obs, agent_id):
+    """Trả về tập hợp tất cả ô bị đe dọa bởi bom do agent sở hữu.
+
+    Dùng cho cơ chế Post-Bomb Escape: thưởng khi agent thoát khỏi
+    blast zone bom của mình sau khi đặt.
+    """
+    bombs = obs["bombs"]
+    if bombs is None:
+        return set()
+    arr = np.asarray(bombs)
+    if arr.size == 0:
+        return set()
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+
+    players = obs["players"]
+    grid = obs["map"]
+    own_blast = set()
+
+    for i in range(arr.shape[0]):
+        parsed = _parse_bomb_row(arr[i])
+        if parsed is None:
+            continue
+        bx, by, timer, owner_id = parsed
+        if int(owner_id) != int(agent_id):
+            continue
+        radius = _bomb_radius_from_obs(players, owner_id)
+        own_blast |= _explosion_tiles_for_bomb(grid, bx, by, radius)
+
+    return own_blast
+
+
 # =====================================================================
 # 3. HÀM TÍNH PHẦN THƯỞNG CHÍNH (CONDITIONAL HYBRID REWARD FUNCTION)
 # =====================================================================
@@ -362,10 +401,14 @@ def compute_reward(prev_obs, curr_obs, agent_id):
     curr_x, curr_y = int(curr_players[agent_id][0]), int(curr_players[agent_id][1])
 
     # -----------------------------------------------------------------
-    # CHỐNG NÚP LÙM THỤ ĐỘNG
+    # CHỐNG NÚP LÙM THỤ ĐỘNG (giảm penalty khi đang trong danger zone)
     # -----------------------------------------------------------------
     if prev_x == curr_x and prev_y == curr_y:
-        reward += REWARD_DICT["standing_still"]  # Phạt liên tục nếu đứng im
+        # Giảm penalty standing_still khi trong danger → cho phép agent suy nghĩ
+        still_pen = REWARD_DICT["standing_still"]
+        if (curr_x, curr_y) in danger_soon_curr:
+            still_pen *= 0.3  # Giảm 70% penalty khi đang trong vùng nguy hiểm
+        reward += still_pen
     else:
         reward -= REWARD_DICT["standing_still"]  # Di chuyển sẽ triệt tiêu điểm phạt
 
@@ -421,7 +464,27 @@ def compute_reward(prev_obs, curr_obs, agent_id):
     # Phạt loiter khi đứng quá gần ngòi nổ quả bom của chính mình
     mt_own = _min_own_blast_timer_at(curr_obs, agent_id, curr_x, curr_y)
     if mt_own is not None:
+        # ★ Phạt leo thang theo timer: càng gần nổ càng phạt nặng
         reward += REWARD_DICT["own_blast_loiter"] * float(max(1, 8 - mt_own))
+
+    # -----------------------------------------------------------------
+    # ★ MỚI: POST-BOMB ESCAPE — Thưởng/phạt né bom sau khi đặt
+    # -----------------------------------------------------------------
+    # Kiểm tra bom do agent sở hữu đang trên sân
+    _own_blast_prev = _get_own_blast_zone(prev_obs, agent_id)
+    _own_blast_curr = _get_own_blast_zone(curr_obs, agent_id)
+
+    prev_in_own = (prev_x, prev_y) in _own_blast_prev if _own_blast_prev else False
+    curr_in_own = (curr_x, curr_y) in _own_blast_curr if _own_blast_curr else False
+
+    if prev_in_own and not curr_in_own:
+        # Agent vừa thoát khỏi blast zone bom mình → THƯỞNG LỚN
+        reward += REWARD_DICT["post_bomb_escape"]
+    elif curr_in_own and (prev_x == curr_x and prev_y == curr_y):
+        # Agent đứng yên trong blast zone bom mình → PHẠT LEO THANG
+        own_timer = _min_own_blast_timer_at(curr_obs, agent_id, curr_x, curr_y)
+        urgency = 1.0 / max(own_timer, 1) if own_timer else 0.5
+        reward += REWARD_DICT["post_bomb_linger"] * (1.0 + urgency)
 
     # Thưởng hướng đi tiếp cận dồn ép kẻ địch
     if prev_enemies_alive > 0 and curr_enemies_alive > 0:

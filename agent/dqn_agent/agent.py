@@ -163,7 +163,8 @@ class TrainingAgent:
 
 # ──────────────────────────── Training Loop ─────────────────────────────
 def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
-              max_steps=500, seed=86, save_model=True, pretrained_model=None):
+              max_steps=500, seed=86, save_model=True, pretrained_model=None,
+              lr=1e-4):
     from tqdm import tqdm
     import sys as _sys
     _root = Path(__file__).resolve().parent.parent.parent
@@ -187,7 +188,6 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
 
     # Hyperparameters
     batch_size = 128
-    lr = 5e-4
     n_step = 3
     buf_cap = 100_000
 
@@ -284,13 +284,16 @@ def training():
     p.add_argument("--num_episodes", type=int, default=200)
     p.add_argument("--max_steps", type=int, default=500)
     p.add_argument("--seed", type=int, default=86)
+    p.add_argument("--lr", type=float, default=1e-4,
+                   help="Learning rate (1e-4 fine-tune, 5e-4 train mới)")
     p.add_argument("--save_model", action="store_true")
     p.add_argument("--load_model", type=str, default=None)
     args = p.parse_args()
     seed_everything(args.seed)
     train_dqn(enemy_type=args.enemy_type, num_episodes=args.num_episodes,
               max_steps=args.max_steps, seed=args.seed,
-              save_model=args.save_model, pretrained_model=args.load_model)
+              save_model=args.save_model, pretrained_model=args.load_model,
+              lr=args.lr)
 
 
 # ──────────────────── Submission Agent (mandatory) ──────────────────────
@@ -301,7 +304,7 @@ class Agent:
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "latest_checkpoint (1).pth"
+        ckpt_path = Path(__file__).parent / "best_model (4).pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:
