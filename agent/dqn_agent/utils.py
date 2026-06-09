@@ -23,11 +23,12 @@ def seed_everything(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-def save_model_fn(model, optimizer, global_step, epsilon, lr, input_spec, num_actions, path, noisy=True):
+def save_model_fn(model, optimizer, global_step, epsilon, lr, input_spec, num_actions, path, noisy=True, episode_count=0):
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "global_step": global_step,
+        "episode_count": episode_count,
         "epsilon": epsilon,
         "lr": lr,
         "input_dim": input_spec,  # backward-compatible key name
@@ -38,7 +39,7 @@ def save_model_fn(model, optimizer, global_step, epsilon, lr, input_spec, num_ac
     }
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(checkpoint, path)
-    print(f"Model saved to {path}")
+    print(f"Model saved to {path} (episode={episode_count}, step={global_step})")
 
 
 def plot_loss(loss_history, save_path=None):

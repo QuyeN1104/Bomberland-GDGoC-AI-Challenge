@@ -38,9 +38,10 @@ class TrainingAgent:
     team_id = "DQNv3"
 
     # ── Exploration hyperparameters ──
-    EPS_START = 1.0           # Full random at the beginning
-    EPS_END = 0.05            # Minimum epsilon (NoisyNets handle the rest)
-    EPS_DECAY_EPISODES = 3000 # Linear decay over this many episodes
+    # Epsilon-greedy OFF by default — NoisyNets handle exploration adaptively.
+    # Enable via CLI: --eps_start 1.0 --eps_end 0.05
+    EPS_START = 0.0           # No epsilon-greedy (NoisyNets only)
+    EPS_END = 0.0             # No epsilon-greedy (NoisyNets only)
     BOMB_ACTION = 5           # Action index for placing bomb
     BOMB_EXPLORE_PROB = 0.30  # 30% chance to pick bomb during random exploration
 
@@ -54,6 +55,7 @@ class TrainingAgent:
         self.global_step = 0
         self.tau = 0.005  # Polyak soft-update coefficient
         self.episode_count = 0  # Track episodes for epsilon decay
+        self.num_episodes = 1   # Total episodes (set by train_dqn)
 
         if pretrained_model:
             self._load(pretrained_model)
@@ -70,8 +72,8 @@ class TrainingAgent:
 
     @property
     def epsilon(self):
-        """Linear epsilon decay: EPS_START → EPS_END over EPS_DECAY_EPISODES."""
-        frac = min(self.episode_count / max(self.EPS_DECAY_EPISODES, 1), 1.0)
+        """Linear epsilon decay: EPS_START → EPS_END over num_episodes."""
+        frac = min(self.episode_count / max(self.num_episodes, 1), 1.0)
         return self.EPS_START + (self.EPS_END - self.EPS_START) * frac
 
     def _random_action_bomb_biased(self):
@@ -164,7 +166,8 @@ class TrainingAgent:
 # ──────────────────────────── Training Loop ─────────────────────────────
 def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
               max_steps=500, seed=86, save_model=True, pretrained_model=None,
-              lr=1e-4):
+              lr=1e-4, eps_start=None, eps_end=None,
+              episode_count_override=None):
     from tqdm import tqdm
     import sys as _sys
     _root = Path(__file__).resolve().parent.parent.parent
@@ -200,6 +203,21 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
 
     agent = TrainingAgent(user_id, input_spec, n_actions, lr=lr,
                           device=device, pretrained_model=pretrained_model)
+
+    # Override exploration params if specified
+    if eps_start is not None:
+        agent.EPS_START = eps_start
+    if eps_end is not None:
+        agent.EPS_END = eps_end
+    agent.num_episodes = num_episodes  # Decay over total training episodes
+    if episode_count_override is not None:
+        agent.episode_count = episode_count_override
+
+    print(f"Exploration: eps={agent.epsilon:.3f} "
+          f"(start={agent.EPS_START}, end={agent.EPS_END}, "
+          f"decay over {num_episodes} episodes, "
+          f"episode_count={agent.episode_count})")
+
     buf = PrioritizedReplayBuffer(buf_cap, input_spec[0], input_spec[1],
                                   n_step=n_step, gamma=agent.gamma)
     n_step_gamma = agent.gamma ** n_step
@@ -257,7 +275,8 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
                 if (ep + 1) % 10 == 0:
                     latest_path = f"{save_folder}/latest_checkpoint.pth"
                     save_model_fn(agent.q_net, agent.optimizer, agent.global_step,
-                                  0.0, agent.lr, input_spec, n_actions, latest_path)
+                                  0.0, agent.lr, input_spec, n_actions, latest_path,
+                                  episode_count=agent.episode_count)
                 
                 current_ma = np.mean(rew_hist[-10:]) if len(rew_hist) >= 10 else total_r
                 
@@ -265,7 +284,8 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
                     best_moving_avg = current_ma
                     best_path = f"{save_folder}/best_model.pth"
                     save_model_fn(agent.q_net, agent.optimizer, agent.global_step,
-                                  0.0, agent.lr, input_spec, n_actions, best_path)
+                                  0.0, agent.lr, input_spec, n_actions, best_path,
+                                  episode_count=agent.episode_count)
 
     tag = f"dqnv2_{enemy_type}_{num_episodes}ep_{seed}s"
     folder = f"ckpts/{tag}"
@@ -288,12 +308,20 @@ def training():
                    help="Learning rate (1e-4 fine-tune, 5e-4 train mới)")
     p.add_argument("--save_model", action="store_true")
     p.add_argument("--load_model", type=str, default=None)
+    # Exploration overrides
+    p.add_argument("--eps_start", type=float, default=None,
+                   help="Override epsilon start (default: 0.0, set 1.0 to enable)")
+    p.add_argument("--eps_end", type=float, default=None,
+                   help="Override epsilon end (default: 0.0, set 0.05 for light exploration)")
+    p.add_argument("--episode_count", type=int, default=None,
+                   help="Override starting episode count (ép epsilon về giá trị mong muốn)")
     args = p.parse_args()
     seed_everything(args.seed)
     train_dqn(enemy_type=args.enemy_type, num_episodes=args.num_episodes,
               max_steps=args.max_steps, seed=args.seed,
               save_model=args.save_model, pretrained_model=args.load_model,
-              lr=args.lr)
+              lr=args.lr, eps_start=args.eps_start, eps_end=args.eps_end,
+              episode_count_override=args.episode_count)
 
 
 # ──────────────────── Submission Agent (mandatory) ──────────────────────
