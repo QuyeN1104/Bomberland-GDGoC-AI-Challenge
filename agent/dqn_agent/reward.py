@@ -37,12 +37,12 @@ REWARD_DICT = {
     "time_penalty": -0.02,       # ↓ -0.03→-0.02: Giảm nhẹ noise nền
 
     # ── Chiến đấu — GIẢM để không lấn át death penalty ──
-    "bomb_plant_base": 0.05,     # ↓ 0.10→0.05: Thưởng nhẹ cho hành vi đặt bom
-    "plant_near_box": 0.20,      # ↓ 0.40→0.20: Giảm để tổng stack không quá cao
-    "plant_near_enemy": 0.30,    # ↓ 0.50→0.30: Giảm nhưng vẫn khuyến khích
+    "bomb_plant_base": 0.1,     # ↓ 0.10→0.05: Thưởng nhẹ cho hành vi đặt bom
+    "plant_near_box": 0.3,      # ↓ 0.40→0.20: Giảm để tổng stack không quá cao
+    "plant_near_enemy": 0.6,    # ↓ 0.50→0.30: Giảm nhưng vẫn khuyến khích
     "box_destroyed": 0.60,       # ↓ 0.80→0.60: Thưởng thực tế khi phá hòm
-    "safe_bomb_plant": 0.30,     # ↓ 0.70→0.30: Giảm mạnh — tránh stack quá cao
-    "suicide_bomb_plant": -2.0,  # ↑↑ -0.80→-2.0: PHẢI phạt nặng đặt bom tự sát
+    "safe_bomb_plant": 0.5,     # ↓ 0.70→0.30: Giảm mạnh — tránh stack quá cao
+    "suicide_bomb_plant": -4.0,  # ↑↑ -0.80→-2.0: PHẢI phạt nặng đặt bom tự sát
     "chain_bomb_plant": 0.50,    # ↓ 0.80→0.50: Giảm nhẹ
 
     # ── ★ MỚI: Post-Bomb Escape — Cơ chế né bom sau khi đặt ──
