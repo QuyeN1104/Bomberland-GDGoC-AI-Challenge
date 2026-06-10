@@ -29,25 +29,26 @@ _DEFAULT_BOMB_OWNER = 0
 REWARD_DICT = {
     # ── Terminal: Death penalty PHẢI áp đảo mọi combo thưởng đặt bom ──
     "win": 5.0,                  # ↑ 3.0→5.0: Thưởng chiến thắng phải là mục tiêu tối thượng
-    "enemy_death": 2.5,          # Giữ nguyên
+    "enemy_death": 3,          # Giữ nguyên
     "agent_death": -5.0,         # ↑↑ -2.5→-5.0: PHẢI lớn hơn tổng combo bomb (~2.0)
 
     # ── Di chuyển & Chống núp lùm ──
     "standing_still": -0.05,     # ↓ -0.10→-0.05: Giảm để agent có thể suy nghĩ khi trong danger
     "time_penalty": -0.02,       # ↓ -0.03→-0.02: Giảm nhẹ noise nền
 
-    # ── Chiến đấu — GIẢM để không lấn át death penalty ──
-    "bomb_plant_base": 0.1,     # ↓ 0.10→0.05: Thưởng nhẹ cho hành vi đặt bom
-    "plant_near_box": 0.3,      # ↓ 0.40→0.20: Giảm để tổng stack không quá cao
-    "plant_near_enemy": 0.6,    # ↓ 0.50→0.30: Giảm nhưng vẫn khuyến khích
-    "box_destroyed": 0.60,       # ↓ 0.80→0.60: Thưởng thực tế khi phá hòm
-    "safe_bomb_plant": 0.5,     # ↓ 0.70→0.30: Giảm mạnh — tránh stack quá cao
-    "suicide_bomb_plant": -4.0,  # ↑↑ -0.80→-2.0: PHẢI phạt nặng đặt bom tự sát
-    "chain_bomb_plant": 0.50,    # ↓ 0.80→0.50: Giảm nhẹ
+    # ── Chiến đấu — CÂN BẰNG: safe bomb thưởng LỚN, suicide phạt NẶNG ──
+    "bomb_plant_base": 0.20,     # ↑ 0.10→0.20: Khuyến khích thử đặt bom
+    "plant_near_box": 0.40,      # ↑ 0.30→0.40: Thưởng rõ khi đặt cạnh hòm
+    "plant_near_enemy": 0.60,    # Giữ nguyên
+    "box_destroyed": 0.80,       # ↑ 0.60→0.80: Thưởng mạnh khi phá hòm THÀNH CÔNG
+    "safe_bomb_plant": 1.00,     # ↑↑ 0.50→1.00: THƯỞNG LỚN cho bomb an toàn (có đường thoát)
+    "suicide_bomb_plant": -2.0,  # Giữ nguyên — phạt nặng đặt bom không lối thoát
+    "chain_bomb_plant": 0.50,    # Giữ nguyên
 
-    # ── ★ MỚI: Post-Bomb Escape — Cơ chế né bom sau khi đặt ──
-    "post_bomb_escape": 0.40,    # ★ Thưởng LỚN khi thoát blast zone bom mình vừa đặt
-    "post_bomb_linger": -0.15,   # ★ Phạt LEO THANG mỗi step còn trong blast zone bom mình
+    # ── ★ Post-Bomb Escape — Cơ chế né bom sau khi đặt ──
+    "post_bomb_escape": 1.00,    # ↑ 0.80→1.00: THƯỞNG LỚN khi thoát blast zone thành công
+    "post_bomb_linger": -0.25,   # ↓ -0.40→-0.25: Giảm nhẹ để không sợ bomb quá mức
+    "post_bomb_approach_safe": 0.25,  # ↑ 0.20→0.25: Thưởng rõ hơn khi chạy đúng hướng
 
     # ── Kinh tế & Vật phẩm ──
     "item_collection": 0.80,     # ↓ 1.0→0.80: Giảm nhẹ
@@ -388,9 +389,27 @@ def compute_reward(prev_obs, curr_obs, agent_id):
 
     enemy_death_reward = 0.0
     if curr_enemies_alive < prev_enemies_alive:
-        enemy_death_reward = REWARD_DICT["enemy_death"] * (prev_enemies_alive - curr_enemies_alive)
-        # ── Smooth: enemy_death [1x → 2x] ──
-        enemy_death_reward *= (1.0 + 1.0 * hunt_w)
+        # CHỈ thưởng nếu enemy chết trong blast zone bom của agent
+        own_blast = _get_own_blast_zone(prev_obs, agent_id)
+        arr_p = np.asarray(prev_players)
+        if arr_p.ndim == 1:
+            arr_p = arr_p.reshape(1, -1)
+        arr_c = np.asarray(curr_players)
+        if arr_c.ndim == 1:
+            arr_c = arr_c.reshape(1, -1)
+        own_kills = 0
+        for pid in range(arr_p.shape[0]):
+            if pid == agent_id:
+                continue
+            # Enemy vừa chết trong step này
+            if int(arr_p[pid][2]) == 1 and int(arr_c[pid][2]) == 0:
+                ex, ey = int(arr_p[pid][0]), int(arr_p[pid][1])
+                if (ex, ey) in own_blast:
+                    own_kills += 1
+        if own_kills > 0:
+            enemy_death_reward = REWARD_DICT["enemy_death"] * own_kills
+            # ── Smooth: enemy_death [1x → 2x] ──
+            enemy_death_reward *= (1.0 + 1.0 * hunt_w)
     reward += enemy_death_reward
 
     if curr_enemies_alive == 0 and prev_enemies_alive > 0:
@@ -480,11 +499,33 @@ def compute_reward(prev_obs, curr_obs, agent_id):
     if prev_in_own and not curr_in_own:
         # Agent vừa thoát khỏi blast zone bom mình → THƯỞNG LỚN
         reward += REWARD_DICT["post_bomb_escape"]
-    elif curr_in_own and (prev_x == curr_x and prev_y == curr_y):
-        # Agent đứng yên trong blast zone bom mình → PHẠT LEO THANG
+    elif curr_in_own:
+        # Agent CÒN trong blast zone bom mình (dù di chuyển hay đứng yên) → PHẠT
         own_timer = _min_own_blast_timer_at(curr_obs, agent_id, curr_x, curr_y)
-        urgency = 1.0 / max(own_timer, 1) if own_timer else 0.5
-        reward += REWARD_DICT["post_bomb_linger"] * (1.0 + urgency)
+        # Urgency leo thang mạnh: timer 7→1 ⇒ multiplier ~1.1→8.0
+        urgency = (8.0 / max(own_timer, 1)) if own_timer else 4.0
+        linger_penalty = REWARD_DICT["post_bomb_linger"] * urgency
+        # Phạt thêm nếu đứng yên (tệ hơn di chuyển sai hướng)
+        if prev_x == curr_x and prev_y == curr_y:
+            linger_penalty *= 1.5
+        reward += linger_penalty
+
+        # Thưởng nhẹ nếu đang di chuyển HƯỚNG VỀ ô an toàn (dù chưa thoát)
+        if prev_x != curr_x or prev_y != curr_y:
+            _own_blast_set = _own_blast_curr
+            # Đếm ô an toàn liền kề vị trí hiện tại vs vị trí cũ
+            def _safe_neighbors(x, y, blast_set, g):
+                count = 0
+                for dx, dy in ((-1,0),(1,0),(0,-1),(0,1)):
+                    nx, ny = x+dx, y+dy
+                    if 0 <= nx < g.shape[0] and 0 <= ny < g.shape[1]:
+                        if (nx, ny) not in blast_set and g[nx, ny] not in (WALL, BOX):
+                            count += 1
+                return count
+            curr_safe = _safe_neighbors(curr_x, curr_y, _own_blast_set, curr_obs["map"])
+            prev_safe = _safe_neighbors(prev_x, prev_y, _own_blast_prev, prev_obs["map"])
+            if curr_safe > prev_safe:
+                reward += REWARD_DICT["post_bomb_approach_safe"]
 
     # Thưởng hướng đi tiếp cận dồn ép kẻ địch
     if prev_enemies_alive > 0 and curr_enemies_alive > 0:
@@ -547,14 +588,27 @@ def compute_reward(prev_obs, curr_obs, agent_id):
         else:
             reward += REWARD_DICT["suicide_bomb_plant"]  # Đặt bom tự sát → phạt (đã giảm nhẹ)
 
-    # Ghi nhận thành quả phá hòm thực tế sau vụ nổ
-    prev_boxes = int(np.sum(prev_obs["map"] == BOX))
-    curr_boxes = int(np.sum(curr_obs["map"] == BOX))
-    if curr_boxes < prev_boxes:
-        box_reward = REWARD_DICT["box_destroyed"] * (prev_boxes - curr_boxes)
-        # ── Smooth: box_destroyed [1x → 2x] ──
-        box_reward *= (1.0 + 1.0 * farm_w)
-        reward += box_reward
+    # Ghi nhận thành quả phá hòm — CHỈ tính box bị phá bởi bom của agent
+    # So sánh map trước/sau để tìm ô box biến mất, rồi kiểm tra xem ô đó
+    # có nằm trong blast zone bom của agent không.
+    prev_map = prev_obs["map"]
+    curr_map = curr_obs["map"]
+    own_blast = _get_own_blast_zone(prev_obs, agent_id)
+
+    if own_blast:  # Agent có bom đang trên sân
+        own_boxes_destroyed = 0
+        # Tìm các ô chuyển từ BOX → không phải BOX (bị phá)
+        box_mask = (prev_map == BOX) & (curr_map != BOX)
+        destroyed_positions = np.argwhere(box_mask)
+        for pos in destroyed_positions:
+            if (int(pos[0]), int(pos[1])) in own_blast:
+                own_boxes_destroyed += 1
+
+        if own_boxes_destroyed > 0:
+            box_reward = REWARD_DICT["box_destroyed"] * own_boxes_destroyed
+            # ── Smooth: box_destroyed [1x → 2x] ──
+            box_reward *= (1.0 + 1.0 * farm_w)
+            reward += box_reward
 
     # Thưởng sống sót
     reward += REWARD_DICT["survival_bonus"]
