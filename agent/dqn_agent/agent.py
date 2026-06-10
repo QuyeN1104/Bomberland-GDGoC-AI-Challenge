@@ -78,15 +78,18 @@ class TrainingAgent:
         frac = min(self.episode_count / max(self.num_episodes, 1), 1.0)
         return self.EPS_START + (self.EPS_END - self.EPS_START) * frac
 
-    def _random_action_bomb_biased(self):
+    def _random_action_bomb_biased(self, aux_state=None):
         """Bomb-biased random action with movement momentum.
 
-        - 30% chance: bomb action
+        - 30% chance: bomb action (skip if no bombs left)
         - 70% chance: move action, with momentum:
             - If last random was a move (0-3), 40% repeat same direction
             - Remaining 60% uniform over other moves + idle
         """
-        if random.random() < self.BOMB_EXPLORE_PROB:
+        # Kiểm tra còn bom không: aux_state[0] = bombs_ratio, 0 = hết bom
+        has_bombs = aux_state is None or float(aux_state[0]) > 0
+
+        if has_bombs and random.random() < self.BOMB_EXPLORE_PROB:
             self._last_random_action = self.BOMB_ACTION
             return self.BOMB_ACTION
 
@@ -110,7 +113,7 @@ class TrainingAgent:
         """
         eps = self.epsilon if epsilon is None else epsilon
         if eps > 0 and random.random() < eps:
-            return self._random_action_bomb_biased()
+            return self._random_action_bomb_biased(aux_state)
         mt = torch.from_numpy(map_state).unsqueeze(0).to(self.device)
         at = torch.from_numpy(aux_state).unsqueeze(0).to(self.device)
         with torch.no_grad():
@@ -185,7 +188,7 @@ class TrainingAgent:
 def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
               max_steps=500, seed=86, save_model=True, pretrained_model=None,
               lr=1e-4, eps_start=None, eps_end=None,
-              episode_count_override=None):
+              episode_count_override=None, save_dir="ckpts"):
     from tqdm import tqdm
     import sys as _sys
     _root = Path(__file__).resolve().parent.parent.parent
@@ -243,8 +246,10 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
     loss_hist, rew_hist, win_hist = [], [], []
 
     best_moving_avg = -float('inf')
-    save_folder = f"ckpts/dqnv2_{enemy_type}_{num_episodes}ep_{seed}s"
-    Path(save_folder).mkdir(parents=True, exist_ok=True) # Đảm bảo thư mục tồn tại
+    tag = f"dqnv2_{enemy_type}_{num_episodes}ep_{seed}s"
+    save_folder = f"{save_dir}/{tag}"
+    Path(save_folder).mkdir(parents=True, exist_ok=True)
+    print(f"Checkpoints: {save_folder}")
 
     with tqdm(total=num_episodes, desc="Training DQN v2") as pbar:
         for ep in range(num_episodes):
@@ -305,13 +310,10 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
                                   0.0, agent.lr, input_spec, n_actions, best_path,
                                   episode_count=agent.episode_count)
 
-    tag = f"dqnv2_{enemy_type}_{num_episodes}ep_{seed}s"
-    folder = f"ckpts/{tag}"
-  
-    plot_loss(loss_hist, save_path=f"{folder}/{tag}_loss.png")
-    plot_rewards(rew_hist, save_path=f"{folder}/{tag}_rewards.png")
-    plot_win_rates(win_hist, save_path=f"{folder}/{tag}_winrates.png")
-    plot_moving_average(rew_hist, 10, save_path=f"{folder}/{tag}_ma.png")
+    plot_loss(loss_hist, save_path=f"{save_folder}/{tag}_loss.png")
+    plot_rewards(rew_hist, save_path=f"{save_folder}/{tag}_rewards.png")
+    plot_win_rates(win_hist, save_path=f"{save_folder}/{tag}_winrates.png")
+    plot_moving_average(rew_hist, 10, save_path=f"{save_folder}/{tag}_ma.png")
 
 
 def training():
@@ -325,6 +327,8 @@ def training():
     p.add_argument("--lr", type=float, default=1e-4,
                    help="Learning rate (1e-4 fine-tune, 5e-4 train mới)")
     p.add_argument("--save_model", action="store_true")
+    p.add_argument("--save_dir", type=str, default="ckpts",
+                   help="Thư mục lưu checkpoint (vd: /content/drive/MyDrive/bomberland)")
     p.add_argument("--load_model", type=str, default=None)
     # Exploration overrides
     p.add_argument("--eps_start", type=float, default=None,
@@ -339,7 +343,7 @@ def training():
               max_steps=args.max_steps, seed=args.seed,
               save_model=args.save_model, pretrained_model=args.load_model,
               lr=args.lr, eps_start=args.eps_start, eps_end=args.eps_end,
-              episode_count_override=args.episode_count)
+              episode_count_override=args.episode_count, save_dir=args.save_dir)
 
 
 # ──────────────────── Submission Agent (mandatory) ──────────────────────
