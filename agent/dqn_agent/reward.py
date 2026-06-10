@@ -56,10 +56,8 @@ REWARD_DICT = {
     "item_compete_bonus": 0.15,  # ↓ 0.20→0.15
     "survival_bonus": 0.02,      # ↑ 0.01→0.02: Tăng nhẹ thưởng sống sót
 
-    # ── Nhận biết nguy hiểm — TĂNG MẠNH ──
-    "danger_evasion": 0.40,      # ↑↑ 0.20→0.40: Thưởng mạnh khi né thoát vùng nguy hiểm
-    "danger_enter": -0.20,       # ↑ -0.10→-0.20: Phạt mạnh hơn khi lao vào danger
-    "own_blast_loiter": -0.10,   # ↑ -0.05→-0.10: Phạt mạnh hơn khi lảng vảng cạnh bom mình
+    # ── Nhận biết nguy hiểm ──
+    "danger_enter": -0.20,       # Phạt khi lao vào vùng nguy hiểm
 
     # ── Định vị không gian ──
     "approach_enemy": 0.08,      # ↓ 0.10→0.08: Giảm nhẹ
@@ -312,6 +310,26 @@ def _min_own_blast_timer_at(obs, agent_id, x, y):
     return best
 
 
+def _min_blast_timer_at(obs, x, y):
+    """Tìm timer nhỏ nhất của BẤT KÌ bom nào đang đe dọa ô (x, y)."""
+    bombs = obs["bombs"]
+    if bombs is None: return None
+    arr = np.asarray(bombs)
+    if arr.size == 0: return None
+    if arr.ndim == 1: arr = arr.reshape(1, -1)
+
+    players = obs["players"]
+    grid = obs["map"]
+    best = None
+    for i in range(arr.shape[0]):
+        parsed = _parse_bomb_row(arr[i])
+        if parsed is None: continue
+        bx, by, timer, owner_id = parsed
+        radius = _bomb_radius_from_obs(players, owner_id)
+        if (int(x), int(y)) in _explosion_tiles_for_bomb(grid, bx, by, radius):
+            best = int(timer) if best is None else min(best, int(timer))
+    return best
+
 def _get_own_blast_zone(obs, agent_id):
     """Trả về tập hợp tất cả ô bị đe dọa bởi bom do agent sở hữu.
 
@@ -468,62 +486,40 @@ def compute_reward(prev_obs, curr_obs, agent_id):
         reward += compete_reward
 
     # -----------------------------------------------------------------
-    # NÉ BOM SINH TỒN THÔNG MINH
+    # NÉ BOM SINH TỒN THÔNG MINH (TẤT CẢ BOM, không chỉ bom mình)
     # -----------------------------------------------------------------
     prev_in_danger = (prev_x, prev_y) in danger_soon_prev
     curr_in_danger = (curr_x, curr_y) in danger_soon_curr
 
     if prev_in_danger and not curr_in_danger:
-        # ── Smooth: danger_evasion [1x → 1.5x] ──
-        evasion_reward = REWARD_DICT["danger_evasion"] * (1.0 + 0.5 * farm_w)
-        reward += evasion_reward
-    elif not prev_in_danger and curr_in_danger and (prev_x != curr_x or prev_y != curr_y):
-        reward += REWARD_DICT["danger_enter"]   # Phạt nếu cố tình lao đầu vào vùng nguy hiểm
-
-    # Phạt loiter khi đứng quá gần ngòi nổ quả bom của chính mình
-    mt_own = _min_own_blast_timer_at(curr_obs, agent_id, curr_x, curr_y)
-    if mt_own is not None:
-        # ★ Phạt leo thang theo timer: càng gần nổ càng phạt nặng
-        reward += REWARD_DICT["own_blast_loiter"] * float(max(1, 8 - mt_own))
-
-    # -----------------------------------------------------------------
-    # ★ MỚI: POST-BOMB ESCAPE — Thưởng/phạt né bom sau khi đặt
-    # -----------------------------------------------------------------
-    # Kiểm tra bom do agent sở hữu đang trên sân
-    _own_blast_prev = _get_own_blast_zone(prev_obs, agent_id)
-    _own_blast_curr = _get_own_blast_zone(curr_obs, agent_id)
-
-    prev_in_own = (prev_x, prev_y) in _own_blast_prev if _own_blast_prev else False
-    curr_in_own = (curr_x, curr_y) in _own_blast_curr if _own_blast_curr else False
-
-    if prev_in_own and not curr_in_own:
-        # Agent vừa thoát khỏi blast zone bom mình → THƯỞNG LỚN
+        # Agent thoát khỏi blast zone BẤT KÌ bom nào → THƯỞNG LỚN
         reward += REWARD_DICT["post_bomb_escape"]
-    elif curr_in_own:
-        # Agent CÒN trong blast zone bom mình (dù di chuyển hay đứng yên) → PHẠT
-        own_timer = _min_own_blast_timer_at(curr_obs, agent_id, curr_x, curr_y)
-        # Urgency leo thang mạnh: timer 7→1 ⇒ multiplier ~1.1→8.0
-        urgency = (8.0 / max(own_timer, 1)) if own_timer else 4.0
+    elif not prev_in_danger and curr_in_danger and (prev_x != curr_x or prev_y != curr_y):
+        # Cố tình lao vào vùng nguy hiểm
+        reward += REWARD_DICT["danger_enter"]
+    elif curr_in_danger:
+        # Agent CÒN trong blast zone (bất kì bom nào) → PHẠT leo thang
+        # Tìm timer nhỏ nhất của bom gần nhất đe dọa ô hiện tại
+        min_timer = _min_blast_timer_at(curr_obs, curr_x, curr_y)
+        urgency = (8.0 / max(min_timer, 1)) if min_timer else 4.0
         linger_penalty = REWARD_DICT["post_bomb_linger"] * urgency
-        # Phạt thêm nếu đứng yên (tệ hơn di chuyển sai hướng)
+        # Đứng yên tệ hơn di chuyển sai hướng
         if prev_x == curr_x and prev_y == curr_y:
             linger_penalty *= 1.5
         reward += linger_penalty
 
-        # Thưởng nhẹ nếu đang di chuyển HƯỚNG VỀ ô an toàn (dù chưa thoát)
+        # Thưởng nhẹ nếu di chuyển HƯỚNG VỀ ô an toàn
         if prev_x != curr_x or prev_y != curr_y:
-            _own_blast_set = _own_blast_curr
-            # Đếm ô an toàn liền kề vị trí hiện tại vs vị trí cũ
-            def _safe_neighbors(x, y, blast_set, g):
+            def _safe_neighbors(x, y, danger_set, g):
                 count = 0
                 for dx, dy in ((-1,0),(1,0),(0,-1),(0,1)):
                     nx, ny = x+dx, y+dy
                     if 0 <= nx < g.shape[0] and 0 <= ny < g.shape[1]:
-                        if (nx, ny) not in blast_set and g[nx, ny] not in (WALL, BOX):
+                        if (nx, ny) not in danger_set and g[nx, ny] not in (WALL, BOX):
                             count += 1
                 return count
-            curr_safe = _safe_neighbors(curr_x, curr_y, _own_blast_set, curr_obs["map"])
-            prev_safe = _safe_neighbors(prev_x, prev_y, _own_blast_prev, prev_obs["map"])
+            curr_safe = _safe_neighbors(curr_x, curr_y, danger_soon_curr, curr_obs["map"])
+            prev_safe = _safe_neighbors(prev_x, prev_y, danger_soon_prev, prev_obs["map"])
             if curr_safe > prev_safe:
                 reward += REWARD_DICT["post_bomb_approach_safe"]
 

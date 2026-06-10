@@ -43,7 +43,8 @@ class TrainingAgent:
     EPS_START = 0.0           # No epsilon-greedy (NoisyNets only)
     EPS_END = 0.0             # No epsilon-greedy (NoisyNets only)
     BOMB_ACTION = 5           # Action index for placing bomb
-    BOMB_EXPLORE_PROB = 0.30  # 30% chance to pick bomb during random exploration
+    BOMB_EXPLORE_PROB = 0.30  # 30% bomb, 70% move (đủ để khám phá đặt bom)
+    MOVE_MOMENTUM = 0.40      # 40% giữ hướng cũ khi random move (tạo chuỗi chạy thẳng)
 
     def __init__(self, agent_id, input_spec, num_actions, lr=5e-4,
                  device="cpu", pretrained_model=None):
@@ -56,6 +57,7 @@ class TrainingAgent:
         self.tau = 0.005  # Polyak soft-update coefficient
         self.episode_count = 0  # Track episodes for epsilon decay
         self.num_episodes = 1   # Total episodes (set by train_dqn)
+        self._last_random_action = None  # Track for momentum
 
         if pretrained_model:
             self._load(pretrained_model)
@@ -77,15 +79,31 @@ class TrainingAgent:
         return self.EPS_START + (self.EPS_END - self.EPS_START) * frac
 
     def _random_action_bomb_biased(self):
-        """Bomb-biased random action: 30% bomb, 70% uniform over other actions."""
+        """Bomb-biased random action with movement momentum.
+
+        - 30% chance: bomb action
+        - 70% chance: move action, with momentum:
+            - If last random was a move (0-3), 40% repeat same direction
+            - Remaining 60% uniform over other moves + idle
+        """
         if random.random() < self.BOMB_EXPLORE_PROB:
-            return self.BOMB_ACTION  # Force bomb action
+            self._last_random_action = self.BOMB_ACTION
+            return self.BOMB_ACTION
+
+        # Move actions: 0=up, 1=down, 2=left, 3=right, 4=idle
+        last = self._last_random_action
+        if last is not None and 0 <= last <= 3 and random.random() < self.MOVE_MOMENTUM:
+            # Momentum: giữ hướng di chuyển cũ
+            return last
+
         # Uniform over non-bomb actions: 0,1,2,3,4
-        return random.randint(0, self.num_actions - 2)
+        action = random.randint(0, self.num_actions - 2)
+        self._last_random_action = action
+        return action
 
     # ── action selection ──
     def act(self, map_state, aux_state, epsilon=None):
-        """Epsilon-greedy with bomb-biased exploration + NoisyNets.
+        """Epsilon-greedy with bomb-biased momentum exploration + NoisyNets.
 
         During training: uses self.epsilon (auto-decaying) unless overridden.
         During eval: pass epsilon=0.0 to disable random exploration.
