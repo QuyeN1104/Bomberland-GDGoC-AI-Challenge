@@ -256,12 +256,12 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
     from replay_buffer import PrioritizedReplayBuffer
 
     env = BomberEnv(max_steps=max_steps, seed=seed)
-    enemies = {
+    enemy_classes = {
         "simple": SimpleRuleAgent, "smarter": SmarterRuleAgent,
         "tactical": TacticalRuleAgent, "genius": GeniusRuleAgent,
         "box_farmer": BoxFarmerAgent,
     }
-    enemy_agent = enemies[enemy_type](1)
+    EnemyClass = enemy_classes[enemy_type]
 
     # Hyperparameters
     batch_size = 128
@@ -306,21 +306,27 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
 
     with tqdm(total=num_episodes, desc="Training DQN v2") as pbar:
         for ep in range(num_episodes):
+            # Random spawn: agent ở 1 trong 4 góc, 3 enemy còn lại
+            ep_user_id = random.randint(0, 3)
+            ep_enemy_ids = [i for i in range(4) if i != ep_user_id]
+            enemy_agents = [EnemyClass(eid) for eid in ep_enemy_ids]
+
             obs = env.reset(seed=seed + ep)
             prev_obs = None
             total_r = 0.0
+            ids = [ep_user_id] + ep_enemy_ids
             ms, axs = encode_obs(obs, ids)
 
             for _ in range(max_steps):
                 ua = agent.act(ms, axs)  # auto epsilon + bomb-biased + noisy
-                ea = enemy_agent.act(obs)
-                actions = [None, None]
-                actions[user_id] = ua
-                actions[enemy_agent.agent_id] = ea
+                actions = [None, None, None, None]
+                actions[ep_user_id] = ua
+                for ea_agent in enemy_agents:
+                    actions[ea_agent.agent_id] = ea_agent.act(obs)
 
                 nobs, term, trunc = env.step(actions)
                 done = term or trunc
-                r = compute_reward(prev_obs, nobs, agent_id=user_id)
+                r = compute_reward(prev_obs, nobs, agent_id=ep_user_id)
                 total_r += r
 
                 nms, naxs = encode_obs(nobs, ids)
@@ -337,7 +343,7 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
                 obs = nobs
                 ms, axs = nms, naxs
                 if done:
-                    win_hist.append(1 if nobs["players"][user_id][2] else 0)
+                    win_hist.append(1 if nobs["players"][ep_user_id][2] else 0)
                     break
 
             agent.episode_count += 1  # Track for epsilon decay
@@ -407,7 +413,7 @@ class Agent:
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "best_model(3).pth"
+        ckpt_path = Path(__file__).parent / "best_model(4).pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:
