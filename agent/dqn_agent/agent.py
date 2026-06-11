@@ -78,29 +78,82 @@ class TrainingAgent:
         frac = min(self.episode_count / max(self.num_episodes, 1), 1.0)
         return self.EPS_START + (self.EPS_END - self.EPS_START) * frac
 
-    def _random_action_bomb_biased(self, aux_state=None):
-        """Bomb-biased random action with movement momentum.
+    # Action-to-delta mapping (from engine/player.py):
+    # 0=STOP, 1=LEFT(dx=-1), 2=RIGHT(dx=+1), 3=UP(dy=-1), 4=DOWN(dy=+1), 5=BOMB
+    _ACTION_DELTAS = {1: (-1, 0), 2: (1, 0), 3: (0, -1), 4: (0, 1)}
+
+    def _get_valid_moves(self, map_state):
+        """Tìm các hướng di chuyển hợp lệ từ map_state channels.
+
+        Channels: 1=wall, 2=box, 5=my_pos, 7=bomb_timer
+        Returns: set of valid move actions (subset of {1,2,3,4})
+        """
+        # Tìm vị trí agent từ channel 5
+        pos_ch = map_state[5]
+        pos = np.argwhere(pos_ch > 0.5)
+        if len(pos) == 0:
+            return {1, 2, 3, 4}  # Fallback: cho phép tất cả
+
+        ax, ay = int(pos[0][0]), int(pos[0][1])
+        H, W = map_state.shape[1], map_state.shape[2]
+
+        valid = set()
+        for action, (dx, dy) in self._ACTION_DELTAS.items():
+            nx, ny = ax + dx, ay + dy
+            # Ngoài biên (biên ngoài cùng là wall)
+            if not (0 < nx < H - 1 and 0 < ny < W - 1):
+                continue
+            # Bị chặn bởi wall (ch1) hoặc box (ch2)
+            if map_state[1, nx, ny] > 0.5 or map_state[2, nx, ny] > 0.5:
+                continue
+            # Bị chặn bởi bom (ch7: bomb_timer > 0)
+            if map_state[7, nx, ny] > 0.01:
+                continue
+            valid.add(action)
+        return valid
+
+    def _random_action_bomb_biased(self, map_state=None, aux_state=None):
+        """Bomb-biased random action with smart momentum.
 
         - 30% chance: bomb action (skip if no bombs left)
         - 70% chance: move action, with momentum:
-            - If last random was a move (0-3), 40% repeat same direction
-            - Remaining 60% uniform over other moves + idle
+            - If last move is still valid, 40% repeat same direction
+            - Otherwise pick from valid directions only
+            - If no valid direction, idle (0)
         """
         # Kiểm tra còn bom không: aux_state[0] = bombs_ratio, 0 = hết bom
         has_bombs = aux_state is None or float(aux_state[0]) > 0
 
-        if has_bombs and random.random() < self.BOMB_EXPLORE_PROB:
-            self._last_random_action = self.BOMB_ACTION
-            return self.BOMB_ACTION
+        if has_bombs:
+            bomb_prob = self.BOMB_EXPLORE_PROB
+            # Tăng xác suất bomb khi đứng cạnh box (ch11 = box adjacency)
+            if map_state is not None:
+                pos_ch = map_state[5]
+                pos = np.argwhere(pos_ch > 0.5)
+                if len(pos) > 0:
+                    ax, ay = int(pos[0][0]), int(pos[0][1])
+                    if map_state[11, ax, ay] > 0.01:  # Có box liền kề
+                        bomb_prob = 0.60  # 30% → 60%
 
-        # Move actions: 0=up, 1=down, 2=left, 3=right, 4=idle
+            if random.random() < bomb_prob:
+                self._last_random_action = self.BOMB_ACTION
+                return self.BOMB_ACTION
+
+        # Lọc hướng hợp lệ từ map
+        valid_moves = self._get_valid_moves(map_state) if map_state is not None else {1, 2, 3, 4}
+
+        if not valid_moves:
+            # Không đi được đâu → idle
+            self._last_random_action = 0
+            return 0
+
+        # Momentum: giữ hướng cũ NẾU hướng đó vẫn hợp lệ
         last = self._last_random_action
-        if last is not None and 0 <= last <= 3 and random.random() < self.MOVE_MOMENTUM:
-            # Momentum: giữ hướng di chuyển cũ
+        if last is not None and last in valid_moves and random.random() < self.MOVE_MOMENTUM:
             return last
 
-        # Uniform over non-bomb actions: 0,1,2,3,4
-        action = random.randint(0, self.num_actions - 2)
+        # Random từ các hướng hợp lệ (không bao gồm idle để ưu tiên di chuyển)
+        action = random.choice(list(valid_moves))
         self._last_random_action = action
         return action
 
@@ -113,7 +166,7 @@ class TrainingAgent:
         """
         eps = self.epsilon if epsilon is None else epsilon
         if eps > 0 and random.random() < eps:
-            return self._random_action_bomb_biased(aux_state)
+            return self._random_action_bomb_biased(map_state, aux_state)
         mt = torch.from_numpy(map_state).unsqueeze(0).to(self.device)
         at = torch.from_numpy(aux_state).unsqueeze(0).to(self.device)
         with torch.no_grad():
@@ -354,7 +407,7 @@ class Agent:
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "best_model (6).pth"
+        ckpt_path = Path(__file__).parent / "best_model(3).pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:

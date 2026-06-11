@@ -1,1 +1,0 @@
-zip -r submission-1.zip agent.py latest_checkpoint.pth model.py obs_encoder.py 
