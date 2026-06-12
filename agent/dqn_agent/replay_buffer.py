@@ -68,6 +68,10 @@ class PrioritizedReplayBuffer:
         self.dones = np.zeros(capacity, dtype=np.float32)
         self._nstep_buf = deque(maxlen=n_step)
 
+    def reset_episode(self):
+        """Flush n-step buffer between episodes to prevent cross-episode contamination."""
+        self._nstep_buf.clear()
+
     def __len__(self):
         return self.tree.n_entries
 

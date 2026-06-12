@@ -54,7 +54,7 @@ class TrainingAgent:
         self.gamma = 0.99
         self.lr = lr
         self.global_step = 0
-        self.tau = 0.005  # Polyak soft-update coefficient
+        self.tau = 0.001  # Polyak soft-update coefficient (giảm từ 0.005 để ổn định hơn)
         self.episode_count = 0  # Track episodes for epsilon decay
         self.num_episodes = 1   # Total episodes (set by train_dqn)
         self._last_random_action = None  # Track for momentum
@@ -267,6 +267,7 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
     batch_size = 128
     n_step = 3
     buf_cap = 100_000
+    train_every = 4  # Train mỗi 4 steps thay vì mỗi step
 
     dummy = env.reset(seed=seed)
     ids = list(range(4))  # all player IDs for shape inference
@@ -312,11 +313,13 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
             enemy_agents = [EnemyClass(eid) for eid in ep_enemy_ids]
 
             obs = env.reset(seed=seed + ep)
-            prev_obs = None
+            prev_obs = obs  # Dùng obs hiện tại thay vì None để step đầu có reward hợp lệ
+            buf.reset_episode()  # Flush n-step buffer tránh ô nhiễm xuyên episode
             total_r = 0.0
             ids = [ep_user_id] + ep_enemy_ids
             ms, axs = encode_obs(obs, ids)
 
+            env_step = 0
             for _ in range(max_steps):
                 ua = agent.act(ms, axs)  # auto epsilon + bomb-biased + noisy
                 actions = [None, None, None, None]
@@ -331,8 +334,9 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
 
                 nms, naxs = encode_obs(nobs, ids)
                 buf.push(ms, axs, ua, r, nms, naxs, float(done))
+                env_step += 1
 
-                if len(buf) >= batch_size:
+                if len(buf) >= batch_size and env_step % train_every == 0:
                     sms, saxs, snms, snaxs, sa, sr, sd, tidx, w = buf.sample(batch_size)
                     loss, td = agent.train_step(sms, saxs, snms, snaxs, sa, sr, sd,
                                                 weights=w, n_step_gamma=n_step_gamma)
