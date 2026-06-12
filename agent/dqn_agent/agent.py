@@ -269,7 +269,7 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
     buf_cap = 100_000
 
     dummy = env.reset(seed=seed)
-    ids = [user_id, enemy_agent.agent_id]
+    ids = list(range(4))  # all player IDs for shape inference
     s0 = encode_obs(dummy, ids)
     input_spec = (s0[0].shape, s0[1].shape[0])
     n_actions = 6
