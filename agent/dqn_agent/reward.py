@@ -5,9 +5,11 @@ Continuous dynamic reward multipliers based on bombs_left:
   - farm_w = 1 - hunt_w                — complementary
   - No hard threshold discontinuity; rewards scale smoothly.
 
-v5 additions:
+v5 additions & fixes:
   - Competitive item pickup: bonus when agent is closer to item than enemies
   - Chain bomb detection: high reward for placing bombs that trigger chain explosions
+  - FIXED bomb placement detection: correctly uses observation array instead of bomb_left diff
+  - Removed dead code for optimization
 
 IMPORTANT: No engine imports. All map constants hard-coded for submission.
 """
@@ -28,39 +30,39 @@ _DEFAULT_BOMB_OWNER = 0
 # =====================================================================
 REWARD_DICT = {
     # ── Terminal: Death penalty PHẢI áp đảo mọi combo thưởng đặt bom ──
-    "win": 5.0,                  # ↑ 3.0→5.0: Thưởng chiến thắng phải là mục tiêu tối thượng
-    "enemy_death": 3,          # Giữ nguyên
-    "agent_death": -5.0,         # ↑↑ -2.5→-5.0: PHẢI lớn hơn tổng combo bomb (~2.0)
+    "win": 5.0,                  
+    "enemy_death": 3.0,          
+    "agent_death": -5.0,         
 
     # ── Di chuyển & Chống núp lùm ──
-    "standing_still": -0.05,     # ↓ -0.10→-0.05: Giảm để agent có thể suy nghĩ khi trong danger
-    "time_penalty": -0.02,       # ↓ -0.03→-0.02: Giảm nhẹ noise nền
+    "standing_still": -0.05,     
+    "time_penalty": -0.02,       
 
     # ── Chiến đấu — CÂN BẰNG: safe bomb thưởng LỚN, suicide phạt NẶNG ──
-    "bomb_plant_base": 0.20,     # ↑ 0.10→0.20: Khuyến khích thử đặt bom
-    "plant_near_box": 0.40,      # ↑ 0.30→0.40: Thưởng rõ khi đặt cạnh hòm
-    "plant_near_enemy": 0.60,    # Giữ nguyên
-    "box_destroyed": 0.80,       # ↑ 0.60→0.80: Thưởng mạnh khi phá hòm THÀNH CÔNG
-    "safe_bomb_plant": 1.00,     # ↑↑ 0.50→1.00: THƯỞNG LỚN cho bomb an toàn (có đường thoát)
-    "suicide_bomb_plant": -2.0,  # Giữ nguyên — phạt nặng đặt bom không lối thoát
-    "chain_bomb_plant": 0.50,    # Giữ nguyên
+    "bomb_plant_base": 0.20,     
+    "plant_near_box": 0.40,      
+    "plant_near_enemy": 0.60,    
+    "box_destroyed": 0.80,       
+    "safe_bomb_plant": 1.00,     
+    "suicide_bomb_plant": -2.0,  
+    "chain_bomb_plant": 0.50,    
 
     # ── ★ Post-Bomb Escape — Cơ chế né bom sau khi đặt ──
-    "post_bomb_escape": 1.00,    # ↑ 0.80→1.00: THƯỞNG LỚN khi thoát blast zone thành công
-    "post_bomb_linger": -0.25,   # ↓ -0.40→-0.25: Giảm nhẹ để không sợ bomb quá mức
-    "post_bomb_approach_safe": 0.25,  # ↑ 0.20→0.25: Thưởng rõ hơn khi chạy đúng hướng
+    "post_bomb_escape": 1.00,    
+    "post_bomb_linger": -0.25,   
+    "post_bomb_approach_safe": 0.25,  
 
     # ── Kinh tế & Vật phẩm ──
-    "item_collection": 0.80,     # ↓ 1.0→0.80: Giảm nhẹ
-    "approach_item": 0.10,       # ↓ 0.15→0.10
-    "item_compete_bonus": 0.15,  # ↓ 0.20→0.15
-    "survival_bonus": 0.02,      # ↑ 0.01→0.02: Tăng nhẹ thưởng sống sót
+    "item_collection": 0.80,     
+    "approach_item": 0.10,       
+    "item_compete_bonus": 0.15,  
+    "survival_bonus": 0.02,      
 
     # ── Nhận biết nguy hiểm ──
-    "danger_enter": -0.20,       # Phạt khi lao vào vùng nguy hiểm
+    "danger_enter": -0.20,       
 
     # ── Định vị không gian ──
-    "approach_enemy": 0.08,      # ↓ 0.10→0.08: Giảm nhẹ
+    "approach_enemy": 0.08,      
 }
 
 # =====================================================================
@@ -131,35 +133,31 @@ def _get_danger_tiles(grid, bombs, players):
 
 def _can_escape_after_placing_bfs(grid, my_pos, occupied_enemies, danger_soon, bomb_radius,
                                    bomb_timer=_DEFAULT_BOMB_TIMER):
-    """
-    THUẬT TOÁN ĐẮT GIÁ TỪ TACTICAL AGENT (CẢI TIẾN v2):
-    Giả lập đặt bom tại chỗ và chạy BFS xem có KỊP thoát trước khi nổ không.
-    v2: depth limit = min(timer - 1, 8) thay vì cố định 8.
-    """
-    # 1. Tự vẽ vụ nổ giả định của quả bom mình định đặt tại vị trí hiện tại
+    """Giả lập đặt bom tại chỗ và chạy BFS xem có KỊP thoát trước khi nổ không."""
     my_blast = _explosion_tiles_for_bomb(grid, my_pos[0], my_pos[1], bomb_radius)
-    # Vùng nguy hiểm hỗn hợp = Bom hiện có trên sân + Quả bom mình định đặt
     combined_danger = set(danger_soon) | my_blast
 
-    # 2. BFS với depth limit = timer - 1 (phải thoát TRƯỚC khi nổ)
     max_depth = min(bomb_timer - 1, 8)
     q = deque([(my_pos, 0)])
     seen = {my_pos}
+    
     while q:
         pos, depth = q.popleft()
         if pos not in combined_danger and depth > 0:
-            return True  # Tìm thấy lối thoát an toàn VÀ kịp thời gian!
+            return True  # Tìm thấy lối thoát an toàn
+            
         if depth >= max_depth:
             continue
+            
         for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             nx, ny = pos[0] + dx, pos[1] + dy
             if 0 <= nx < grid.shape[0] and 0 <= ny < grid.shape[1]:
-                # Ô có thể đi được (Cỏ, Item) và không bị đối thủ chặn chân
+                # Ô có thể đi được và không bị đối thủ chặn
                 if grid[nx, ny] in [0, ITEM_RADIUS, ITEM_CAPACITY] and (nx, ny) not in occupied_enemies:
                     if (nx, ny) not in seen:
                         seen.add((nx, ny))
                         q.append(((nx, ny), depth + 1))
-    return False  # Đặt bom ở đây đồng nghĩa với tự sát!
+    return False
 
 
 def _manhattan_to_nearest_item(grid, x, y):
@@ -173,13 +171,7 @@ def _manhattan_to_nearest_item(grid, x, y):
 
 
 def _competitive_item_advantage(grid, players, agent_id, ax, ay):
-    """Tính lợi thế cạnh tranh item: thưởng khi agent gần item hơn TẤT CẢ đối thủ.
-
-    Returns:
-        Tổng điểm advantage cho tất cả items mà agent gần hơn địch.
-        Mỗi item cho điểm = (enemy_dist - agent_dist) / max_dist, capped [0, 1].
-        Trả về 0.0 nếu không có item hoặc không có lợi thế.
-    """
+    """Tính lợi thế cạnh tranh item: thưởng khi agent gần item hơn TẤT CẢ đối thủ."""
     item_positions = np.argwhere((grid == ITEM_RADIUS) | (grid == ITEM_CAPACITY))
     if len(item_positions) == 0:
         return 0.0
@@ -188,25 +180,21 @@ def _competitive_item_advantage(grid, players, agent_id, ax, ay):
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
 
-    # Gom tọa độ đối thủ còn sống
     enemies = []
     for pid in range(arr.shape[0]):
         if pid != agent_id and int(arr[pid][2]) == 1:
             enemies.append((int(arr[pid][0]), int(arr[pid][1])))
     if not enemies:
-        return 0.0  # Không có đối thủ → không có cạnh tranh
+        return 0.0 
 
-    max_dist = float(grid.shape[0] + grid.shape[1])  # Chuẩn hóa
+    max_dist = float(grid.shape[0] + grid.shape[1])
     total_advantage = 0.0
 
     for ip in item_positions:
         ix, iy = int(ip[0]), int(ip[1])
         my_dist = abs(ax - ix) + abs(ay - iy)
-
-        # Khoảng cách gần nhất của BẤT KỲ đối thủ nào tới item này
         min_enemy_dist = min(abs(ex - ix) + abs(ey - iy) for ex, ey in enemies)
 
-        # Agent gần hơn → advantage dương
         if my_dist < min_enemy_dist:
             advantage = (min_enemy_dist - my_dist) / max_dist
             total_advantage += min(advantage, 1.0)
@@ -215,22 +203,7 @@ def _competitive_item_advantage(grid, players, agent_id, ax, ay):
 
 
 def _detect_chain_bomb(grid, players, bomb_x, bomb_y, bomb_radius, existing_bombs):
-    """Phát hiện chuỗi nổ lan: bom mới đặt có blast zone chạm bom khác không?
-
-    Cơ chế chain explosion trong Bomberland:
-      Khi bom A nổ, vùng blast chạm tới bom B → bom B nổ ngay lập tức.
-      Agent đặt bom ở vị trí mà blast zone bao phủ bom khác = tạo chain.
-
-    Args:
-        grid: bản đồ hiện tại
-        players: mảng thông tin người chơi
-        bomb_x, bomb_y: vị trí bom vừa đặt
-        bomb_radius: bán kính nổ của bom vừa đặt
-        existing_bombs: mảng numpy các bom đang trên sân (trước khi đặt bom mới)
-
-    Returns:
-        chain_count: số bom bị chạm bởi blast zone (0 = không chain)
-    """
+    """Phát hiện chuỗi nổ lan: bom mới đặt có blast zone chạm bom khác không?"""
     if existing_bombs is None:
         return 0
     arr = np.asarray(existing_bombs)
@@ -239,11 +212,9 @@ def _detect_chain_bomb(grid, players, bomb_x, bomb_y, bomb_radius, existing_bomb
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
 
-    # Vẽ blast zone của bom mới đặt
     new_blast = _explosion_tiles_for_bomb(grid, bomb_x, bomb_y, bomb_radius)
-
     chain_count = 0
-    seen_chains = set()  # Tránh đếm trùng cùng 1 bom
+    seen_chains = set()
 
     for i in range(arr.shape[0]):
         parsed = _parse_bomb_row(arr[i])
@@ -251,14 +222,14 @@ def _detect_chain_bomb(grid, players, bomb_x, bomb_y, bomb_radius, existing_bomb
             continue
         bx, by, timer, owner_id = parsed
         if (bx, by) == (bomb_x, bomb_y):
-            continue  # Bỏ qua chính nó
+            continue 
 
-        # Forward: bom cũ nằm trong blast zone bom mới → chain!
+        # Forward
         if (bx, by) in new_blast and (bx, by) not in seen_chains:
             chain_count += 1
             seen_chains.add((bx, by))
 
-        # Reverse: bom mới nằm trong blast zone bom cũ → cũng chain!
+        # Reverse
         if (bx, by) not in seen_chains:
             old_radius = _bomb_radius_from_obs(players, owner_id)
             old_blast = _explosion_tiles_for_bomb(grid, bx, by, old_radius)
@@ -290,26 +261,6 @@ def _manhattan_to_nearest_alive_enemy(players, agent_id, x, y):
     return best
 
 
-def _min_own_blast_timer_at(obs, agent_id, x, y):
-    bombs = obs["bombs"]
-    if bombs is None: return None
-    arr = np.asarray(bombs)
-    if arr.size == 0 or arr.ndim == 1: return None
-
-    players = obs["players"]
-    grid = obs["map"]
-    best = None
-    for i in range(arr.shape[0]):
-        parsed = _parse_bomb_row(arr[i])
-        if parsed is None: continue
-        bx, by, timer, owner_id = parsed
-        if int(owner_id) != int(agent_id): continue
-        radius = _bomb_radius_from_obs(players, owner_id)
-        if (int(x), int(y)) in _explosion_tiles_for_bomb(grid, bx, by, radius):
-            best = int(timer) if best is None else min(best, int(timer))
-    return best
-
-
 def _min_blast_timer_at(obs, x, y):
     """Tìm timer nhỏ nhất của BẤT KÌ bom nào đang đe dọa ô (x, y)."""
     bombs = obs["bombs"]
@@ -330,12 +281,9 @@ def _min_blast_timer_at(obs, x, y):
             best = int(timer) if best is None else min(best, int(timer))
     return best
 
-def _get_own_blast_zone(obs, agent_id):
-    """Trả về tập hợp tất cả ô bị đe dọa bởi bom do agent sở hữu.
 
-    Dùng cho cơ chế Post-Bomb Escape: thưởng khi agent thoát khỏi
-    blast zone bom của mình sau khi đặt.
-    """
+def _get_own_blast_zone(obs, agent_id):
+    """Trả về tập hợp tất cả ô bị đe dọa bởi bom do agent sở hữu."""
     bombs = obs["bombs"]
     if bombs is None:
         return set()
@@ -366,19 +314,7 @@ def _get_own_blast_zone(obs, agent_id):
 # 3. HÀM TÍNH PHẦN THƯỞNG CHÍNH (CONDITIONAL HYBRID REWARD FUNCTION)
 # =====================================================================
 def compute_reward(prev_obs, curr_obs, agent_id):
-    """Compute shaped reward with smooth continuous multipliers.
-
-    Smooth Conditional Reward Shaping (no hard threshold):
-      hunt_w = min(bombs_left / 2.0, 1.0)  → [0, 1] linear ramp
-      farm_w = 1.0 - hunt_w                → [1, 0] complementary
-
-      approach_enemy  *= (1 + 2 × hunt_w)  → [1x, 3x]
-      enemy_death     *= (1 + 1 × hunt_w)  → [1x, 2x]
-      time_penalty    *= (1 + 1 × hunt_w)  → [1x, 2x]
-      approach_item   *= (1 + 2 × farm_w)  → [1x, 3x]
-      box_destroyed   *= (1 + 1 × farm_w)  → [1x, 2x]
-      danger_evasion  *= (1 + 0.5 × farm_w) → [1x, 1.5x]
-    """
+    """Compute shaped reward with smooth continuous multipliers."""
     if prev_obs is None:
         return 0.0
 
@@ -401,114 +337,97 @@ def compute_reward(prev_obs, curr_obs, agent_id):
     hunt_w = min(curr_bombs_left / 2.0, 1.0)  # [0→1], smooth at threshold=2
     farm_w = 1.0 - hunt_w                      # [1→0], complementary
 
-    # Kiểm tra chỉ số hạ gục đối thủ và chiến thắng
+    # Tọa độ di chuyển của Agent
+    prev_x, prev_y = int(prev_players[agent_id][0]), int(prev_players[agent_id][1])
+    curr_x, curr_y = int(curr_players[agent_id][0]), int(curr_players[agent_id][1])
+
+    # Kills & Wins
     prev_enemies_alive = _enemy_alive_count(prev_players, agent_id)
     curr_enemies_alive = _enemy_alive_count(curr_players, agent_id)
 
     enemy_death_reward = 0.0
     if curr_enemies_alive < prev_enemies_alive:
-        # CHỈ thưởng nếu enemy chết trong blast zone bom của agent
         own_blast = _get_own_blast_zone(prev_obs, agent_id)
         arr_p = np.asarray(prev_players)
-        if arr_p.ndim == 1:
-            arr_p = arr_p.reshape(1, -1)
+        if arr_p.ndim == 1: arr_p = arr_p.reshape(1, -1)
         arr_c = np.asarray(curr_players)
-        if arr_c.ndim == 1:
-            arr_c = arr_c.reshape(1, -1)
+        if arr_c.ndim == 1: arr_c = arr_c.reshape(1, -1)
+        
         own_kills = 0
         for pid in range(arr_p.shape[0]):
-            if pid == agent_id:
-                continue
-            # Enemy vừa chết trong step này
+            if pid == agent_id: continue
             if int(arr_p[pid][2]) == 1 and int(arr_c[pid][2]) == 0:
                 ex, ey = int(arr_p[pid][0]), int(arr_p[pid][1])
                 if (ex, ey) in own_blast:
                     own_kills += 1
+                    
         if own_kills > 0:
             enemy_death_reward = REWARD_DICT["enemy_death"] * own_kills
-            # ── Smooth: enemy_death [1x → 2x] ──
             enemy_death_reward *= (1.0 + 1.0 * hunt_w)
     reward += enemy_death_reward
 
     if curr_enemies_alive == 0 and prev_enemies_alive > 0:
         reward += REWARD_DICT["win"]
 
-    # Tọa độ di chuyển của Agent
-    prev_x, prev_y = int(prev_players[agent_id][0]), int(prev_players[agent_id][1])
-    curr_x, curr_y = int(curr_players[agent_id][0]), int(curr_players[agent_id][1])
-
-    # Lấy thông tin vùng nguy hiểm toàn cục (phải tính TRƯỚC khi dùng)
+    # Vùng nguy hiểm
     danger_soon_prev, danger_now_prev = _get_danger_tiles(prev_obs["map"], prev_obs["bombs"], prev_players)
     danger_soon_curr, _ = _get_danger_tiles(curr_obs["map"], curr_obs["bombs"], curr_players)
 
     # -----------------------------------------------------------------
-    # CHỐNG NÚP LÙM THỤ ĐỘNG (giảm penalty khi đang trong danger zone)
+    # CHỐNG NÚP LÙM THỤ ĐỘNG
     # -----------------------------------------------------------------
     if prev_x == curr_x and prev_y == curr_y:
-        # Giảm penalty standing_still khi trong danger → cho phép agent suy nghĩ
         still_pen = REWARD_DICT["standing_still"]
         if (curr_x, curr_y) in danger_soon_curr:
             still_pen *= 0.3  # Giảm 70% penalty khi đang trong vùng nguy hiểm
         reward += still_pen
     else:
-        reward -= REWARD_DICT["standing_still"]  # Di chuyển sẽ triệt tiêu điểm phạt
+        reward -= REWARD_DICT["standing_still"] 
 
-    # ── Smooth: time_penalty [1x → 2x] ──
     time_pen = REWARD_DICT["time_penalty"] * (1.0 + 1.0 * hunt_w)
     reward += time_pen
 
     # -----------------------------------------------------------------
-    # CƠ CHẾ ĐIỀU HƯỚNG ĂN VẬT PHẨM (MẮT THẦN TOÀN CỤC)
+    # VẬT PHẨM
     # -----------------------------------------------------------------
     prev_item_d = _manhattan_to_nearest_item(prev_obs["map"], prev_x, prev_y)
     curr_item_d = _manhattan_to_nearest_item(curr_obs["map"], curr_x, curr_y)
 
     if prev_item_d is not None and curr_item_d is not None:
         approach_item_reward = REWARD_DICT["approach_item"] * (prev_item_d - curr_item_d)
-        # ── Smooth: approach_item [1x → 3x] ──
         approach_item_reward *= (1.0 + 2.0 * farm_w)
         reward += approach_item_reward
 
-    # Thưởng tĩnh khi ăn thành công vật phẩm
     if prev_obs["map"][curr_x, curr_y] in [ITEM_RADIUS, ITEM_CAPACITY]:
         reward += REWARD_DICT["item_collection"]
 
-    # -----------------------------------------------------------------
-    # CẠNH TRANH VẬT PHẨM: Thưởng khi agent gần item hơn đối thủ
-    # -----------------------------------------------------------------
     item_advantage = _competitive_item_advantage(
         curr_obs["map"], curr_players, agent_id, curr_x, curr_y
     )
     if item_advantage > 0:
         compete_reward = REWARD_DICT["item_compete_bonus"] * item_advantage
-        # ── Smooth: item_compete [1x → 2x] ở farming mode ──
         compete_reward *= (1.0 + 1.0 * farm_w)
         reward += compete_reward
 
     # -----------------------------------------------------------------
-    # NÉ BOM SINH TỒN THÔNG MINH (TẤT CẢ BOM, không chỉ bom mình)
+    # NÉ BOM SINH TỒN THÔNG MINH
     # -----------------------------------------------------------------
     prev_in_danger = (prev_x, prev_y) in danger_soon_prev
     curr_in_danger = (curr_x, curr_y) in danger_soon_curr
 
     if prev_in_danger and not curr_in_danger:
-        # Agent thoát khỏi blast zone BẤT KÌ bom nào → THƯỞNG LỚN
         reward += REWARD_DICT["post_bomb_escape"]
     elif not prev_in_danger and curr_in_danger and (prev_x != curr_x or prev_y != curr_y):
-        # Cố tình lao vào vùng nguy hiểm
         reward += REWARD_DICT["danger_enter"]
     elif curr_in_danger:
-        # Agent CÒN trong blast zone (bất kì bom nào) → PHẠT leo thang
-        # Tìm timer nhỏ nhất của bom gần nhất đe dọa ô hiện tại
         min_timer = _min_blast_timer_at(curr_obs, curr_x, curr_y)
         urgency = (8.0 / max(min_timer, 1)) if min_timer else 4.0
         linger_penalty = REWARD_DICT["post_bomb_linger"] * urgency
-        # Đứng yên tệ hơn di chuyển sai hướng
+        
         if prev_x == curr_x and prev_y == curr_y:
             linger_penalty *= 1.5
         reward += linger_penalty
 
-        # Thưởng nhẹ nếu di chuyển HƯỚNG VỀ ô an toàn
         if prev_x != curr_x or prev_y != curr_y:
             def _safe_neighbors(x, y, danger_set, g):
                 count = 0
@@ -523,36 +442,42 @@ def compute_reward(prev_obs, curr_obs, agent_id):
             if curr_safe > prev_safe:
                 reward += REWARD_DICT["post_bomb_approach_safe"]
 
-    # Thưởng hướng đi tiếp cận dồn ép kẻ địch
+    # Áp sát kẻ địch
     if prev_enemies_alive > 0 and curr_enemies_alive > 0:
         prev_enemy_d = _manhattan_to_nearest_alive_enemy(prev_players, agent_id, prev_x, prev_y)
         curr_enemy_d = _manhattan_to_nearest_alive_enemy(curr_players, agent_id, curr_x, curr_y)
         if prev_enemy_d is not None and curr_enemy_d is not None:
             approach_enemy_reward = REWARD_DICT["approach_enemy"] * (prev_enemy_d - curr_enemy_d)
-            # ── Smooth: approach_enemy [1x → 3x] ──
             approach_enemy_reward *= (1.0 + 2.0 * hunt_w)
             reward += approach_enemy_reward
 
     # -----------------------------------------------------------------
-    # ĐẶT BOM ĐƯỢC CHẤM ĐIỂM BỞI THUẬT TOÁN BFS CỦA TACTICAL AGENT
+    # ĐẶT BOM (FIXED: Nhận diện chính xác tuyệt đối qua mảng Bombs)
     # -----------------------------------------------------------------
-    prev_bombs_left = int(prev_players[agent_id][3])
+    just_planted = False
+    if curr_obs["bombs"] is not None:
+        arr_b = np.asarray(curr_obs["bombs"])
+        if arr_b.size > 0:
+            if arr_b.ndim == 1: arr_b = arr_b.reshape(1, -1)
+            for i in range(arr_b.shape[0]):
+                parsed = _parse_bomb_row(arr_b[i])
+                if parsed is not None:
+                    bx, by, timer, owner_id = parsed
+                    if bx == prev_x and by == prev_y and owner_id == agent_id and timer == _DEFAULT_BOMB_TIMER:
+                        just_planted = True
+                        break
 
-    if curr_bombs_left < prev_bombs_left:  # Giây phút nút ĐẶT BOM được bấm
-        # ★ THƯỞNG CƠ BẢN: Bất kỳ lần đặt bom nào cũng được thưởng nhẹ
+    if just_planted:
         reward += REWARD_DICT["bomb_plant_base"]
 
-        # Gom danh sách đối thủ còn sống để làm chướng ngại vật trong BFS
         enemies_set = {(int(p[0]), int(p[1])) for i, p in enumerate(prev_players) if i != agent_id and p[2] == 1}
         my_radius = _bomb_radius_from_obs(prev_players, agent_id)
 
-        # Gọi thuật toán giả lập tìm đường sống của Tactical Baseline
         is_safe = _can_escape_after_placing_bfs(prev_obs["map"], (curr_x, curr_y), enemies_set, danger_soon_prev, my_radius)
 
         if is_safe:
-            reward += REWARD_DICT["safe_bomb_plant"]  # Đặt bom an toàn, có đường lui
+            reward += REWARD_DICT["safe_bomb_plant"] 
 
-            # Thưởng thêm nếu vị trí đặt bom này mang lại giá trị kinh tế (nằm cạnh hòm gỗ)
             adjacent_cells = [
                 prev_obs["map"][max(0, curr_x - 1), curr_y],
                 prev_obs["map"][min(prev_obs["map"].shape[0] - 1, curr_x + 1), curr_y],
@@ -562,38 +487,34 @@ def compute_reward(prev_obs, curr_obs, agent_id):
             if BOX in adjacent_cells:
                 reward += REWARD_DICT["plant_near_box"]
 
-            # ★ MỚI: Thưởng đặt bom gần kẻ địch (blast zone chạm vị trí enemy)
             my_blast = _explosion_tiles_for_bomb(prev_obs["map"], curr_x, curr_y, my_radius)
             enemy_in_blast = sum(1 for epos in enemies_set if epos in my_blast)
             if enemy_in_blast > 0:
                 plant_enemy_reward = REWARD_DICT["plant_near_enemy"] * enemy_in_blast
-                plant_enemy_reward *= (1.0 + 1.0 * hunt_w)  # [1x → 2x] hunting mode
+                plant_enemy_reward *= (1.0 + 1.0 * hunt_w) 
                 reward += plant_enemy_reward
 
-            # ── CHAIN BOMB: Thưởng chuỗi nổ lan ──
             chain_count = _detect_chain_bomb(
                 prev_obs["map"], prev_players,
                 curr_x, curr_y, my_radius,
                 prev_obs["bombs"]
             )
             if chain_count > 0:
-                # Thưởng cao × số bom bị chain, nhân thêm hunt_w vì đây là chiến thuật tấn công
                 chain_reward = REWARD_DICT["chain_bomb_plant"] * chain_count
-                chain_reward *= (1.0 + 1.0 * hunt_w)  # [1x → 2x] ở hunting mode
+                chain_reward *= (1.0 + 1.0 * hunt_w) 
                 reward += chain_reward
         else:
-            reward += REWARD_DICT["suicide_bomb_plant"]  # Đặt bom tự sát → phạt (đã giảm nhẹ)
+            reward += REWARD_DICT["suicide_bomb_plant"]  
 
-    # Ghi nhận thành quả phá hòm — CHỈ tính box bị phá bởi bom của agent
-    # So sánh map trước/sau để tìm ô box biến mất, rồi kiểm tra xem ô đó
-    # có nằm trong blast zone bom của agent không.
+    # -----------------------------------------------------------------
+    # PHÁ HÒM
+    # -----------------------------------------------------------------
     prev_map = prev_obs["map"]
     curr_map = curr_obs["map"]
     own_blast = _get_own_blast_zone(prev_obs, agent_id)
 
-    if own_blast:  # Agent có bom đang trên sân
+    if own_blast:
         own_boxes_destroyed = 0
-        # Tìm các ô chuyển từ BOX → không phải BOX (bị phá)
         box_mask = (prev_map == BOX) & (curr_map != BOX)
         destroyed_positions = np.argwhere(box_mask)
         for pos in destroyed_positions:
@@ -602,11 +523,9 @@ def compute_reward(prev_obs, curr_obs, agent_id):
 
         if own_boxes_destroyed > 0:
             box_reward = REWARD_DICT["box_destroyed"] * own_boxes_destroyed
-            # ── Smooth: box_destroyed [1x → 2x] ──
             box_reward *= (1.0 + 1.0 * farm_w)
             reward += box_reward
 
-    # Thưởng sống sót
     reward += REWARD_DICT["survival_bonus"]
 
     return float(reward)

@@ -1,4 +1,4 @@
-"""Enhanced observation encoding for Bomberland DQN v2 — Conditional RL.
+"""Enhanced observation encoding for Bomberland DQN v4 — Conditional RL.
 
 Produces 13 spatial channels + 9 auxiliary scalars.
 New channels: blast zone prediction, danger heatmap, box adjacency, BFS reachability.
@@ -38,13 +38,7 @@ def _blast_tiles(grid, bx, by, radius):
 
 
 def encode_obs(obs, agent_ids):
-    """Encode observation into (13, H, W) map tensor + (9,) auxiliary vector.
-
-    The last 2 scalars are continuous multi-factor conditioning signals:
-      - hunting_urgency ∈ [0,1]: high bombs + high power + enemy nearby
-      - farming_urgency ∈ [0,1]: low bombs + resources available + safe position
-    These are INDEPENDENT (can both be high or both be low simultaneously).
-    """
+    """Encode observation into (13, H, W) map tensor + (9,) auxiliary vector."""
     if obs is None:
         raise ValueError("obs should not be None")
 
@@ -100,9 +94,12 @@ def encode_obs(obs, agent_ids):
             btimer[bx, by] = max(btimer[bx, by], timer / BOMB_MAX_TIMER)
             bowned[bx, by] = 1.0 if owner == uid else -1.0
             rad = 1 + int(players[owner][4]) if owner < n_players else 1
+            
             for tx, ty in _blast_tiles(grid, bx, by, rad):
                 bzone[tx, ty] = 1.0
+                # Càng gần lúc nổ (timer nhỏ) -> Danger Heatmap càng lớn
                 dheat[tx, ty] = max(dheat[tx, ty], 1.0 / max(timer, 0.5))
+                
         if my_alive and bzone[my_x, my_y] > 0:
             in_blast = 1.0
 
@@ -111,14 +108,20 @@ def encode_obs(obs, agent_ids):
     chs.append(bzone)   # 9
     chs.append(dheat)   # 10
 
-    # Box adjacency
+    # -------------------------------------------------------------
+    # FIXED: Box adjacency (Không dùng np.roll để tránh tràn viền)
+    # -------------------------------------------------------------
     badj = np.zeros((H, W), dtype=np.float32)
     bm = (grid == _Map.BOX).astype(np.float32)
-    for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
-        badj += np.roll(np.roll(bm, dx, 0), dy, 1)
-    chs.append(badj / 4.0)  # 11
+    badj[:-1, :] += bm[1:, :]  # Nhìn xuống
+    badj[1:, :] += bm[:-1, :]  # Nhìn lên
+    badj[:, :-1] += bm[:, 1:]  # Nhìn sang phải
+    badj[:, 1:] += bm[:, :-1]  # Nhìn sang trái
+    chs.append(badj / 4.0)     # 11
 
-    # BFS reachability
+    # -------------------------------------------------------------
+    # FIXED: BFS reachability (Tích hợp Danger Heatmap để né bom)
+    # -------------------------------------------------------------
     reach = np.zeros((H, W), dtype=np.float32)
     if my_alive:
         q = deque([(my_x, my_y, 0)])
@@ -128,15 +131,19 @@ def encode_obs(obs, agent_ids):
         if barr.size > 0:
             for b in barr:
                 bomb_set.add((int(b[0]), int(b[1])))
+                
         while q:
             cx, cy, d = q.popleft()
             reach[cx, cy] = 1.0 - d / md
             for ddx, ddy in ((1,0),(-1,0),(0,1),(0,-1)):
                 nx, ny = cx+ddx, cy+ddy
                 if 0 <= nx < H and 0 <= ny < W and (nx,ny) not in vis:
+                    # KHÔNG PHẢI: Tường (1), Hòm (2), Cục bom (bomb_set)
                     if int(grid[nx,ny]) not in (1,2) and (nx,ny) not in bomb_set:
-                        vis.add((nx,ny))
-                        q.append((nx, ny, d+1))
+                        # FIXED: KHÔNG LAO VÀO CHỖ SẮP NỔ (dheat >= 0.5 nghĩa là timer <= 2 ticks)
+                        if dheat[nx, ny] < 0.5:
+                            vis.add((nx,ny))
+                            q.append((nx, ny, d+1))
     chs.append(reach)  # 12
 
     map_feat = np.stack(chs, axis=0)  # (13, H, W)
@@ -145,7 +152,9 @@ def encode_obs(obs, agent_ids):
     bombs_left = int(players[uid][3])
     bombs_ratio = float(bombs_left) / max(_Player.MAX_BOMB_CAPACITY, 1)
     power_ratio = float(players[uid][4]) / max(_Player.MAX_BOMB_RADIUS, 1)
-    enemy_proximity = 1.0 - (min_dist / 24.0) if my_alive and n_alive > 0 else 0.0
+    
+    # FIXED: Chặn giá trị âm cho enemy_proximity khi map quá rộng
+    enemy_proximity = max(0.0, 1.0 - (min_dist / 24.0)) if my_alive and n_alive > 0 else 0.0
 
     # hunting_urgency: high when well-armed + enemy is close
     hunting_urgency = (

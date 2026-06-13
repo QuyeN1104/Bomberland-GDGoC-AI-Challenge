@@ -1,14 +1,12 @@
-"""DQN Agent v2 — Double Dueling DQN + PER + Noisy Nets + N-step returns.
+"""DQN Agent v5 — Double Dueling DQN + PER + Noisy Nets + Action Masking.
 
-Upgrades over v1:
-  - Double DQN (decouple action selection / evaluation)
-  - Dueling architecture (separate V and A streams)
-  - Noisy Networks (learned exploration, no epsilon schedule)
-  - Prioritized Experience Replay with SumTree
-  - N-step returns (n=3) for faster reward propagation
-  - Huber loss + gradient clipping for stability
-  - Soft target updates (Polyak averaging)
-  - Enhanced observation: 13 spatial channels + 7 scalars
+Upgrades over previous versions:
+  - Explicit NoisyNet Toggling: Forces .train() during rollout for proper exploration, 
+    and .eval() during submission/inference to freeze noise.
+  - Action Masking: Forces Q-Network to ignore invalid moves (walls/boxes) and empty bombs.
+  - Survival Instinct: Overrides exploration to force escaping when standing on an active bomb.
+  - Combo Tactics: 10% chance to drop consecutive bombs while escaping.
+  - Local Epsilon Tracking: Fine-tuning correctly decays epsilon for the current run only.
 """
 from pathlib import Path
 import numpy as np
@@ -20,31 +18,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-# Local imports (available at both training and inference time)
 from model import DuelingDQN
 from obs_encoder import encode_obs
 
 
 # ──────────────────────────── Training Agent ────────────────────────────
 class TrainingAgent:
-    """Agent wrapper for training with Double Dueling DQN.
-
-    Exploration strategy (v3 — bomb-biased warmup):
-      - Epsilon-greedy warmup: eps 1.0 → 0.05 over eps_decay_episodes
-      - During random exploration, bomb action (5) gets BOMB_EXPLORE_PROB (30%)
-        instead of uniform 1/6 ≈ 17%, ensuring agent discovers bombing early
-      - NoisyNets still active on top of epsilon for continuous exploration
-    """
-    team_id = "DQNv3"
+    team_id = "DQNv5"
 
     # ── Exploration hyperparameters ──
-    # Epsilon-greedy OFF by default — NoisyNets handle exploration adaptively.
-    # Enable via CLI: --eps_start 1.0 --eps_end 0.05
-    EPS_START = 0.0           # No epsilon-greedy (NoisyNets only)
-    EPS_END = 0.0             # No epsilon-greedy (NoisyNets only)
-    BOMB_ACTION = 5           # Action index for placing bomb
-    BOMB_EXPLORE_PROB = 0.30  # 30% bomb, 70% move (đủ để khám phá đặt bom)
-    MOVE_MOMENTUM = 0.40      # 40% giữ hướng cũ khi random move (tạo chuỗi chạy thẳng)
+    EPS_START = 0.0           
+    EPS_END = 0.0             
+    BOMB_ACTION = 5           
+    BOMB_EXPLORE_PROB = 0.35  
+    COMBO_BOMB_PROB = 0.10    
+    MOVE_MOMENTUM = 0.35      
 
     def __init__(self, agent_id, input_spec, num_actions, lr=5e-4,
                  device="cpu", pretrained_model=None):
@@ -54,10 +42,11 @@ class TrainingAgent:
         self.gamma = 0.99
         self.lr = lr
         self.global_step = 0
-        self.tau = 0.001  # Polyak soft-update coefficient (giảm từ 0.005 để ổn định hơn)
-        self.episode_count = 0  # Track episodes for epsilon decay
-        self.num_episodes = 1   # Total episodes (set by train_dqn)
-        self._last_random_action = None  # Track for momentum
+        self.tau = 0.001  
+        self.episode_count = 0  
+        self.local_episode = 0  
+        self.num_episodes = 1   
+        self._last_random_action = None  
 
         if pretrained_model:
             self._load(pretrained_model)
@@ -74,25 +63,16 @@ class TrainingAgent:
 
     @property
     def epsilon(self):
-        """Linear epsilon decay: EPS_START → EPS_END over num_episodes."""
-        frac = min(self.episode_count / max(self.num_episodes, 1), 1.0)
+        frac = min(self.local_episode / max(self.num_episodes, 1), 1.0)
         return self.EPS_START + (self.EPS_END - self.EPS_START) * frac
 
-    # Action-to-delta mapping (from engine/player.py):
-    # 0=STOP, 1=LEFT(dx=-1), 2=RIGHT(dx=+1), 3=UP(dy=-1), 4=DOWN(dy=+1), 5=BOMB
     _ACTION_DELTAS = {1: (-1, 0), 2: (1, 0), 3: (0, -1), 4: (0, 1)}
 
     def _get_valid_moves(self, map_state):
-        """Tìm các hướng di chuyển hợp lệ từ map_state channels.
-
-        Channels: 1=wall, 2=box, 5=my_pos, 7=bomb_timer
-        Returns: set of valid move actions (subset of {1,2,3,4})
-        """
-        # Tìm vị trí agent từ channel 5
         pos_ch = map_state[5]
         pos = np.argwhere(pos_ch > 0.5)
         if len(pos) == 0:
-            return {1, 2, 3, 4}  # Fallback: cho phép tất cả
+            return {1, 2, 3, 4}
 
         ax, ay = int(pos[0][0]), int(pos[0][1])
         H, W = map_state.shape[1], map_state.shape[2]
@@ -100,79 +80,99 @@ class TrainingAgent:
         valid = set()
         for action, (dx, dy) in self._ACTION_DELTAS.items():
             nx, ny = ax + dx, ay + dy
-            # Ngoài biên (biên ngoài cùng là wall)
             if not (0 < nx < H - 1 and 0 < ny < W - 1):
                 continue
-            # Bị chặn bởi wall (ch1) hoặc box (ch2)
             if map_state[1, nx, ny] > 0.5 or map_state[2, nx, ny] > 0.5:
                 continue
-            # Bị chặn bởi bom (ch7: bomb_timer > 0)
             if map_state[7, nx, ny] > 0.01:
                 continue
             valid.add(action)
         return valid
 
     def _random_action_bomb_biased(self, map_state=None, aux_state=None):
-        """Bomb-biased random action with smart momentum.
-
-        - 30% chance: bomb action (skip if no bombs left)
-        - 70% chance: move action, with momentum:
-            - If last move is still valid, 40% repeat same direction
-            - Otherwise pick from valid directions only
-            - If no valid direction, idle (0)
-        """
-        # Kiểm tra còn bom không: aux_state[0] = bombs_ratio, 0 = hết bom
+        valid_moves = self._get_valid_moves(map_state) if map_state is not None else {1, 2, 3, 4}
         has_bombs = aux_state is None or float(aux_state[0]) > 0
+
+        is_in_danger = False
+        if map_state is not None:
+            pos_ch = map_state[5]
+            pos = np.argwhere(pos_ch > 0.5)
+            if len(pos) > 0:
+                ax, ay = int(pos[0][0]), int(pos[0][1])
+                if map_state[7, ax, ay] > 0.01:
+                    is_in_danger = True
+
+        if is_in_danger:
+            if has_bombs and random.random() < self.COMBO_BOMB_PROB:
+                self._last_random_action = self.BOMB_ACTION
+                return self.BOMB_ACTION
+            
+            if valid_moves:
+                action = random.choice(list(valid_moves))
+                self._last_random_action = action
+                return action
+            return 0  
 
         if has_bombs:
             bomb_prob = self.BOMB_EXPLORE_PROB
-            # Tăng xác suất bomb khi đứng cạnh box (ch11 = box adjacency)
-            if map_state is not None:
-                pos_ch = map_state[5]
-                pos = np.argwhere(pos_ch > 0.5)
-                if len(pos) > 0:
-                    ax, ay = int(pos[0][0]), int(pos[0][1])
-                    if map_state[11, ax, ay] > 0.01:  # Có box liền kề
-                        bomb_prob = 0.60  # 30% → 60%
-
+            if map_state is not None and len(pos) > 0:
+                if map_state[11, ax, ay] > 0.01:  
+                    bomb_prob = 0.60
+            
             if random.random() < bomb_prob:
                 self._last_random_action = self.BOMB_ACTION
                 return self.BOMB_ACTION
 
-        # Lọc hướng hợp lệ từ map
-        valid_moves = self._get_valid_moves(map_state) if map_state is not None else {1, 2, 3, 4}
-
         if not valid_moves:
-            # Không đi được đâu → idle
             self._last_random_action = 0
             return 0
 
-        # Momentum: giữ hướng cũ NẾU hướng đó vẫn hợp lệ
         last = self._last_random_action
         if last is not None and last in valid_moves and random.random() < self.MOVE_MOMENTUM:
             return last
 
-        # Random từ các hướng hợp lệ (không bao gồm idle để ưu tiên di chuyển)
         action = random.choice(list(valid_moves))
         self._last_random_action = action
         return action
 
-    # ── action selection ──
-    def act(self, map_state, aux_state, epsilon=None):
-        """Epsilon-greedy with bomb-biased momentum exploration + NoisyNets.
-
-        During training: uses self.epsilon (auto-decaying) unless overridden.
-        During eval: pass epsilon=0.0 to disable random exploration.
-        """
-        eps = self.epsilon if epsilon is None else epsilon
-        if eps > 0 and random.random() < eps:
+    def act(self, map_state, aux_state, is_training=True):
+        """Epsilon-greedy with Action Masking and Explicit NoisyNet toggling."""
+        # 1. Random Exploration Phase (Warmup)
+        if is_training and self.epsilon > 0 and random.random() < self.epsilon:
             return self._random_action_bomb_biased(map_state, aux_state)
+            
+        # 2. Exploitation Phase (Q-Network with Action Masking)
         mt = torch.from_numpy(map_state).unsqueeze(0).to(self.device)
         at = torch.from_numpy(aux_state).unsqueeze(0).to(self.device)
+        
+        # Bật noise khi đang thu thập dữ liệu train, tắt noise nếu đang test/đánh giá
+        if is_training:
+            self.q_net.train()
+        else:
+            self.q_net.eval()
+            
         with torch.no_grad():
-            return self.q_net(mt, at).argmax().item()
+            q_values = self.q_net(mt, at).squeeze(0)
+            
+            valid_moves = self._get_valid_moves(map_state)
+            mask = torch.ones(6, dtype=torch.bool, device=self.device)
+            
+            for act_idx in [1, 2, 3, 4]:
+                if act_idx not in valid_moves:
+                    mask[act_idx] = False
+                    
+            has_bombs = float(aux_state[0]) > 0
+            if not has_bombs:
+                mask[self.BOMB_ACTION] = False
+                
+            q_values[~mask] = -float('inf')
+            best_action = q_values.argmax().item()
+            
+            if best_action in [1, 2, 3, 4]:
+                self._last_random_action = best_action
+                
+            return best_action
 
-    # ── training step (Double DQN + Huber + PER weights) ──
     def train_step(self, ms, axs, nms, naxs, act, rew, done,
                    weights=None, n_step_gamma=None):
         dev = self.device
@@ -185,10 +185,11 @@ class TrainingAgent:
         d_t   = torch.from_numpy(done).unsqueeze(1).to(dev)
         g = n_step_gamma if n_step_gamma else self.gamma
 
+        # Đảm bảo mạng đang ở chế độ train để lấy Gradient
+        self.q_net.train()
         q = self.q_net(ms_t, ax_t).gather(1, a_t)
 
         with torch.no_grad():
-            # Double DQN: q_net selects, target_net evaluates
             best_a = self.q_net(nms_t, nax_t).argmax(1, keepdim=True)
             next_q = self.target_net(nms_t, nax_t).gather(1, best_a)
             target = r_t + g * next_q * (1 - d_t)
@@ -206,18 +207,16 @@ class TrainingAgent:
         nn.utils.clip_grad_norm_(self.q_net.parameters(), 10.0)
         self.optimizer.step()
 
-        # Soft target update
         for tp, sp in zip(self.target_net.parameters(), self.q_net.parameters()):
             tp.data.copy_(self.tau * sp.data + (1 - self.tau) * tp.data)
 
-        # Reset noise for next forward pass
+        # Trộn lại nhiễu sau khi cập nhật trọng số
         self.q_net.reset_noise()
         self.target_net.reset_noise()
 
         self.global_step += 1
         return loss.item(), td_err
 
-    # ── persistence ──
     def _load(self, path):
         ckpt = torch.load(path, map_location=self.device)
         spec = ckpt.get("input_spec", ckpt.get("input_shape", ckpt["input_dim"]))
@@ -240,8 +239,7 @@ class TrainingAgent:
 # ──────────────────────────── Training Loop ─────────────────────────────
 def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
               max_steps=500, seed=86, save_model=True, pretrained_model=None,
-              lr=1e-4, eps_start=None, eps_end=None,
-              episode_count_override=None, save_dir="ckpts"):
+              lr=1e-4, eps_start=None, eps_end=None, save_dir="ckpts"):
     from tqdm import tqdm
     import sys as _sys
     _root = Path(__file__).resolve().parent.parent.parent
@@ -263,14 +261,13 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
     }
     EnemyClass = enemy_classes[enemy_type]
 
-    # Hyperparameters
     batch_size = 128
     n_step = 3
     buf_cap = 100_000
-    train_every = 4  # Train mỗi 4 steps thay vì mỗi step
+    train_every = 4
 
     dummy = env.reset(seed=seed)
-    ids = list(range(4))  # all player IDs for shape inference
+    ids = list(range(4))
     s0 = encode_obs(dummy, ids)
     input_spec = (s0[0].shape, s0[1].shape[0])
     n_actions = 6
@@ -279,19 +276,17 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
     agent = TrainingAgent(user_id, input_spec, n_actions, lr=lr,
                           device=device, pretrained_model=pretrained_model)
 
-    # Override exploration params if specified
     if eps_start is not None:
         agent.EPS_START = eps_start
     if eps_end is not None:
         agent.EPS_END = eps_end
-    agent.num_episodes = num_episodes  # Decay over total training episodes
-    if episode_count_override is not None:
-        agent.episode_count = episode_count_override
+        
+    agent.num_episodes = num_episodes
+    agent.local_episode = 0
 
     print(f"Exploration: eps={agent.epsilon:.3f} "
           f"(start={agent.EPS_START}, end={agent.EPS_END}, "
-          f"decay over {num_episodes} episodes, "
-          f"episode_count={agent.episode_count})")
+          f"decay over {num_episodes} FRESH episodes)")
 
     buf = PrioritizedReplayBuffer(buf_cap, input_spec[0], input_spec[1],
                                   n_step=n_step, gamma=agent.gamma)
@@ -300,28 +295,28 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
     loss_hist, rew_hist, win_hist = [], [], []
 
     best_moving_avg = -float('inf')
-    tag = f"dqnv2_{enemy_type}_{num_episodes}ep_{seed}s"
+    tag = f"dqnv5_{enemy_type}_{num_episodes}ep_{seed}s"
     save_folder = f"{save_dir}/{tag}"
     Path(save_folder).mkdir(parents=True, exist_ok=True)
     print(f"Checkpoints: {save_folder}")
 
-    with tqdm(total=num_episodes, desc="Training DQN v2") as pbar:
+    with tqdm(total=num_episodes, desc="Training DQN") as pbar:
         for ep in range(num_episodes):
-            # Random spawn: agent ở 1 trong 4 góc, 3 enemy còn lại
             ep_user_id = random.randint(0, 3)
             ep_enemy_ids = [i for i in range(4) if i != ep_user_id]
             enemy_agents = [EnemyClass(eid) for eid in ep_enemy_ids]
 
             obs = env.reset(seed=seed + ep)
-            prev_obs = obs  # Dùng obs hiện tại thay vì None để step đầu có reward hợp lệ
-            buf.reset_episode()  # Flush n-step buffer tránh ô nhiễm xuyên episode
+            prev_obs = obs
+            buf.reset_episode()
             total_r = 0.0
             ids = [ep_user_id] + ep_enemy_ids
             ms, axs = encode_obs(obs, ids)
 
             env_step = 0
             for _ in range(max_steps):
-                ua = agent.act(ms, axs)  # auto epsilon + bomb-biased + noisy
+                # is_training=True đảm bảo NoisyNet hoạt động trong quá trình thu thập data
+                ua = agent.act(ms, axs, is_training=True)
                 actions = [None, None, None, None]
                 actions[ep_user_id] = ua
                 for ea_agent in enemy_agents:
@@ -350,14 +345,15 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
                     win_hist.append(1 if nobs["players"][ep_user_id][2] else 0)
                     break
 
-            agent.episode_count += 1  # Track for epsilon decay
+            agent.episode_count += 1
+            agent.local_episode += 1
+            
             rew_hist.append(total_r)
             buf.anneal_beta(ep / num_episodes)
             pbar.update(1)
             pbar.set_postfix(R=f"{total_r:.1f}", eps=f"{agent.epsilon:.3f}", step=agent.global_step)
 
             if save_model:
-                # 1. Lưu backup mỗi 10 episodes (để lỡ crash thì load lại từ đây)
                 if (ep + 1) % 10 == 0:
                     latest_path = f"{save_folder}/latest_checkpoint.pth"
                     save_model_fn(agent.q_net, agent.optimizer, agent.global_step,
@@ -387,41 +383,33 @@ def training():
     p.add_argument("--num_episodes", type=int, default=200)
     p.add_argument("--max_steps", type=int, default=500)
     p.add_argument("--seed", type=int, default=86)
-    p.add_argument("--lr", type=float, default=1e-4,
-                   help="Learning rate (1e-4 fine-tune, 5e-4 train mới)")
+    p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--save_model", action="store_true")
-    p.add_argument("--save_dir", type=str, default="ckpts",
-                   help="Thư mục lưu checkpoint (vd: /content/drive/MyDrive/bomberland)")
+    p.add_argument("--save_dir", type=str, default="ckpts")
     p.add_argument("--load_model", type=str, default=None)
-    # Exploration overrides
-    p.add_argument("--eps_start", type=float, default=None,
-                   help="Override epsilon start (default: 0.0, set 1.0 to enable)")
-    p.add_argument("--eps_end", type=float, default=None,
-                   help="Override epsilon end (default: 0.0, set 0.05 for light exploration)")
-    p.add_argument("--episode_count", type=int, default=None,
-                   help="Override starting episode count (ép epsilon về giá trị mong muốn)")
+    p.add_argument("--eps_start", type=float, default=None)
+    p.add_argument("--eps_end", type=float, default=None)
     args = p.parse_args()
     seed_everything(args.seed)
     train_dqn(enemy_type=args.enemy_type, num_episodes=args.num_episodes,
               max_steps=args.max_steps, seed=args.seed,
               save_model=args.save_model, pretrained_model=args.load_model,
               lr=args.lr, eps_start=args.eps_start, eps_end=args.eps_end,
-              episode_count_override=args.episode_count, save_dir=args.save_dir)
+              save_dir=args.save_dir)
 
 
 # ──────────────────── Submission Agent (mandatory) ──────────────────────
 class Agent:
-    """DQN v2 agent for competition submission."""
+    """Eval Agent with integrated Action Masking. NoisyNet is explicitly disabled."""
     def __init__(self, agent_id: int):
         self.agent_id = agent_id
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "best_model(4).pth"
+        ckpt_path = Path(__file__).parent / "best_model.pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:
-            # Fallback: look for any .pth in same dir
             for f in Path(__file__).parent.glob("*.pth"):
                 self._load(str(f)); break
 
@@ -431,24 +419,61 @@ class Agent:
         ms = tuple(spec[0])
         ad = int(spec[1])
         na = ckpt["num_actions"]
-        # Auto-detect noisy from state_dict keys (weight_mu → NoisyLinear)
         has_noisy_keys = "value.0.weight_mu" in ckpt["model_state_dict"]
         noisy = ckpt.get("noisy", has_noisy_keys)
-        # Detect old vs new architecture
         if has_noisy_keys or "value.0.weight" in ckpt["model_state_dict"]:
             self.q_net = DuelingDQN(ms, ad, na, noisy=noisy)
         
         self.q_net.load_state_dict(ckpt["model_state_dict"])
         self.q_net.to(self.device)
+        
+        # VÔ HIỆU HOÁ NOISE CHO QUÁ TRÌNH THI ĐẤU/ĐÁNH GIÁ (TUYỆT ĐỐI QUAN TRỌNG)
         self.q_net.eval()
+
+    def _get_valid_moves(self, map_state):
+        pos_ch = map_state[5]
+        pos = np.argwhere(pos_ch > 0.5)
+        if len(pos) == 0:
+            return {1, 2, 3, 4}
+
+        ax, ay = int(pos[0][0]), int(pos[0][1])
+        H, W = map_state.shape[1], map_state.shape[2]
+
+        valid = set()
+        for action, (dx, dy) in {1: (-1, 0), 2: (1, 0), 3: (0, -1), 4: (0, 1)}.items():
+            nx, ny = ax + dx, ay + dy
+            if not (0 < nx < H - 1 and 0 < ny < W - 1):
+                continue
+            if map_state[1, nx, ny] > 0.5 or map_state[2, nx, ny] > 0.5:
+                continue
+            if map_state[7, nx, ny] > 0.01:
+                continue
+            valid.add(action)
+        return valid
 
     def act(self, obs):
         try:
             ms, axs = encode_obs(obs, [self.agent_id])
             mt = torch.from_numpy(ms).unsqueeze(0).to(self.device)
             at = torch.from_numpy(axs).unsqueeze(0).to(self.device)
+            
             with torch.no_grad():
-                return self.q_net(mt, at).argmax(1).item()
+                q_values = self.q_net(mt, at).squeeze(0)
+                
+                valid_moves = self._get_valid_moves(ms)
+                mask = torch.ones(6, dtype=torch.bool, device=self.device)
+                
+                for act_idx in [1, 2, 3, 4]:
+                    if act_idx not in valid_moves:
+                        mask[act_idx] = False
+                        
+                has_bombs = float(axs[0]) > 0
+                if not has_bombs:
+                    mask[5] = False
+                    
+                q_values[~mask] = -float('inf')
+                return q_values.argmax().item()
+                
         except Exception:
             return 0
 
