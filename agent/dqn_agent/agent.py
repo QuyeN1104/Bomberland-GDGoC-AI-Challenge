@@ -415,7 +415,7 @@ class Agent:
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "best_model_simp.pth"
+        ckpt_path = Path(__file__).parent / "best_model_phase2_3000.pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:
@@ -481,9 +481,11 @@ class Agent:
                     mask[5] = False
                     
                 q_values[~mask] = -float('inf')
+                self.last_q_values = q_values.cpu().numpy().tolist()
                 return q_values.argmax().item()
                 
         except Exception:
+            self.last_q_values = None
             return 0
 
 

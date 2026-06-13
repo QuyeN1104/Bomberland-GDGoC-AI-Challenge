@@ -12,6 +12,14 @@ parent_dir = Path(__file__).resolve().parent.parent
 # Add parent directory to sys.path if not already present
 if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
+root_dir = parent_dir.parent
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
+
+try:
+    from agent.dqn_agent.reward import compute_reward
+except ImportError:
+    compute_reward = None
 
 from engine import BomberEnv
 from agent import RandomAgent, SimpleRuleAgent, SmarterRuleAgent, TacticalRuleAgent, GeniusRuleAgent, BoxFarmerAgent
@@ -20,7 +28,7 @@ from competition.evaluation.runtime_guard import load_agent_instance
 class Viewer:
 	PLAYER_COLORS = [(220, 50, 50), (50, 50, 220), (30, 150, 30), (200, 140, 0)]
 
-	def __init__(self, width=13, height=13, cell_size=42, fps=8, panel_width=200):
+	def __init__(self, width=13, height=13, cell_size=42, fps=8, panel_width=280):
 		self.width = width
 		self.height = height
 		self.cell_size = cell_size
@@ -100,8 +108,10 @@ class Viewer:
 			timer_img = self.font_small.render(str(int(b[2])), True, (255, 255, 255))
 			self.screen.blit(timer_img, (center[0] - 5, center[1] - 8))
 
-	def draw_agent_sidebar(self, players, agent_names):
-		"""Right panel: agent name, alive/dead, bombs available, radius power-up bonus."""
+	def draw_agent_sidebar(self, obs, agent_names):
+		"""Right panel: agent name, alive/dead, bombs available, radius power-up bonus,
+		plus step reward, cumulative reward, and action Q-values."""
+		players = obs["players"]
 		x0 = self.grid_width
 		pygame.draw.rect(self.screen, (52, 58, 64), (x0, 0, self.panel_width, self.screen_height))
 		pygame.draw.line(self.screen, (30, 30, 30), (x0, 0), (x0, self.screen_height), 2)
@@ -110,7 +120,15 @@ class Viewer:
 		self.screen.blit(title, (x0 + 10, self.top_bar + 8))
 
 		y = self.top_bar + 40
-		line_h = 22
+		line_h = 18
+
+		rewards = obs.get("rewards", [0.0] * len(players))
+		cum_rewards = obs.get("cum_rewards", [0.0] * len(players))
+		q_values_list = obs.get("q_values", [None] * len(players))
+		chosen_actions = obs.get("actions", [0] * len(players))
+
+		action_labels = ["Stop", "Up", "Down", "Left", "Right", "Bomb"]
+
 		for i, p in enumerate(players):
 			name = agent_names[i] if i < len(agent_names) and agent_names[i] else f"Agent {i}"
 			alive = int(p[2]) == 1
@@ -118,21 +136,125 @@ class Viewer:
 			radius_bonus = int(p[4])
 			color = self.PLAYER_COLORS[i % len(self.PLAYER_COLORS)]
 
-			pygame.draw.circle(self.screen, color, (x0 + 14, y + 8), 6)
-			name_img = self.font_small.render(str(name)[:28], True, (240, 240, 240))
-			self.screen.blit(name_img, (x0 + 28, y))
+			is_our_agent = ("dqn" in name.lower() or name == "DQNv5" or name not in ["RandomAgent", "SimpleRuleAgent", "SmarterRuleAgent", "TacticalRuleAgent", "GeniusRuleAgent", "BoxFarmerAgent"])
+
+			q_vals = q_values_list[i] if i < len(q_values_list) else None
+			chosen_act = chosen_actions[i] if i < len(chosen_actions) else 0
+
+			breakdowns = obs.get("breakdowns", [None] * len(players))
+			bd = breakdowns[i] if i < len(breakdowns) else None
+			bd_items = []
+			if bd:
+				short_keys = {
+					"Death": "Death",
+					"Kill Enemy": "Kill",
+					"Win Match": "Win",
+					"Standing Still": "Still",
+					"Moving": "Move",
+					"Time Penalty": "Time",
+					"Approach Item": "ApprItem",
+					"Collect Item": "CollItem",
+					"Item Advantage": "ItemAdv",
+					"Escape Danger": "Escape",
+					"Enter Danger": "EnterDang",
+					"Linger Danger": "Linger",
+					"Approach Safe Tile": "ApprSafe",
+					"Approach Enemy": "ApprEnemy",
+					"Plant Bomb Base": "PlantBase",
+					"Safe Bomb Plant": "SafePlant",
+					"Plant Near Box": "NearBox",
+					"Plant Near Enemy": "NearEnemy",
+					"Chain Bomb Plant": "Chain",
+					"Suicide Bomb Plant": "Suicide",
+					"Destroy Box": "DestrBox",
+					"Survival Bonus": "Survival"
+				}
+				bd_items = [f"{short_keys.get(k, k)}:{v:+.2f}" for k, v in bd.items() if abs(v) > 0.001]
+
+			if is_our_agent:
+				# Highlighted box background for DQN agent
+				box_height = 80
+				if q_vals is not None and alive:
+					box_height += 54
+				elif alive:
+					box_height += 18
+				if bd_items:
+					box_height += ((len(bd_items) + 1) // 2) * line_h + 4
+				
+				pygame.draw.rect(self.screen, (40, 45, 52), (x0 + 5, y - 4, self.panel_width - 10, box_height), border_radius=6)
+				pygame.draw.rect(self.screen, (0, 180, 216), (x0 + 5, y - 4, self.panel_width - 10, box_height), width=1, border_radius=6)
+
+			# draw elements
+			pygame.draw.circle(self.screen, color, (x0 + 16, y + 8), 6)
+			name_color = (0, 180, 216) if is_our_agent else (240, 240, 240)
+			name_img = self.font_small.render(str(name)[:28], True, name_color)
+			self.screen.blit(name_img, (x0 + 30, y))
 			y += line_h
 
 			status = "Alive" if alive else "Dead"
 			status_color = (120, 220, 140) if alive else (220, 100, 100)
 			status_img = self.font_small.render(status, True, status_color)
-			self.screen.blit(status_img, (x0 + 10, y))
+			self.screen.blit(status_img, (x0 + 16, y))
+			
+			stats = f"Bombs: {bombs_left} | +Rad: {radius_bonus}"
+			stats_img = self.font_small.render(stats, True, (180, 180, 180))
+			self.screen.blit(stats_img, (x0 + 80, y))
 			y += line_h
 
-			stats = f"Bombs: {bombs_left}  |  +Radius: {radius_bonus}"
-			stats_img = self.font_small.render(stats, True, (200, 200, 200))
-			self.screen.blit(stats_img, (x0 + 10, y))
-			y += line_h + 10
+			# Step Reward & Cum Reward
+			rew = rewards[i] if i < len(rewards) else 0.0
+			cum_rew = cum_rewards[i] if i < len(cum_rewards) else 0.0
+			rew_color = (120, 220, 140) if rew > 0 else (220, 100, 100) if rew < 0 else (180, 180, 180)
+			rew_text = f"Step R: {rew:+.2f}"
+			cum_text = f"Cum R: {cum_rew:+.2f}"
+			
+			rew_img = self.font_small.render(rew_text, True, rew_color)
+			cum_img = self.font_small.render(cum_text, True, (200, 200, 200))
+			self.screen.blit(rew_img, (x0 + 16, y))
+			self.screen.blit(cum_img, (x0 + 130, y))
+			y += line_h
+
+			# Q-values or Action Display
+			if q_vals is not None and alive:
+				for row_idx in range(3):
+					# Col 1
+					a1 = row_idx * 2
+					q1 = q_vals[a1]
+					q1_str = f"{q1:.2f}" if q1 != -float('inf') else "-inf"
+					text1 = f"{action_labels[a1]}:{q1_str}"
+					color1 = (255, 215, 0) if a1 == chosen_act else (150, 150, 150)
+					img1 = self.font_small.render(text1, True, color1)
+					self.screen.blit(img1, (x0 + 16, y))
+
+					# Col 2
+					a2 = row_idx * 2 + 1
+					q2 = q_vals[a2]
+					q2_str = f"{q2:.2f}" if q2 != -float('inf') else "-inf"
+					text2 = f"{action_labels[a2]}:{q2_str}"
+					color2 = (255, 215, 0) if a2 == chosen_act else (150, 150, 150)
+					img2 = self.font_small.render(text2, True, color2)
+					self.screen.blit(img2, (x0 + 130, y))
+					y += line_h
+			else:
+				if alive:
+					act_name = action_labels[chosen_act] if chosen_act < len(action_labels) else str(chosen_act)
+					act_img = self.font_small.render(f"Action: {act_name}", True, (255, 215, 0))
+					self.screen.blit(act_img, (x0 + 16, y))
+					y += line_h
+				else:
+					y += line_h
+
+			if is_our_agent and bd_items:
+				pygame.draw.line(self.screen, (70, 75, 80), (x0 + 10, y + 2), (x0 + self.panel_width - 10, y + 2), 1)
+				y += 4
+				for idx in range(0, len(bd_items), 2):
+					chunk = bd_items[idx:idx+2]
+					line_str = " | ".join(chunk)
+					item_img = self.font_small.render(line_str, True, (130, 200, 250))
+					self.screen.blit(item_img, (x0 + 16, y))
+					y += line_h
+
+			y += 14 if is_our_agent else 10
 
 	def draw_header(self, episode_idx, total_episodes, step_idx, total_steps, paused):
 		pygame.draw.rect(self.screen, (30, 30, 30), (0, 0, self.screen_width, self.top_bar))
@@ -200,7 +322,7 @@ class Viewer:
 		self.draw_explosions(explosion_tiles)
 		self.draw_players(obs["players"])
 		self.draw_bombs(obs["bombs"])
-		self.draw_agent_sidebar(obs["players"], agent_names)
+		self.draw_agent_sidebar(obs, agent_names)
 		self.draw_header(episode_idx, total_episodes, step_idx, total_steps, paused)
 		pygame.display.flip()
 		self.clock.tick(self.fps)
@@ -308,20 +430,65 @@ def simulate_episodes(agent_paths, num_episodes=10, max_steps=500, seed=None, mo
 		obs = env.reset(seed=episode_seed)
 		done = False
 		step = 0
-		trajectory = [clone_obs(obs)]
+		
+		# Initialize cumulative rewards
+		cum_rewards = [0.0] * num_agents
+		
+		first_obs = clone_obs(obs)
+		first_obs["rewards"] = [0.0] * num_agents
+		first_obs["cum_rewards"] = [0.0] * num_agents
+		first_obs["actions"] = [0] * num_agents
+		first_obs["q_values"] = [None] * num_agents
+		first_obs["breakdowns"] = [None] * num_agents
+		trajectory = [first_obs]
 
 		while not done and step < max_steps:
 			actions = []
+			step_q_values = []
 			for i in range(num_agents):
 				try:
 					action = agents[i].act(obs)
+					q_vals = getattr(agents[i], "last_q_values", None)
 				except Exception as e:
 					print(f"Agent {names[i]} failed to act: {e}")
 					action = 0
+					q_vals = None
 				actions.append(action)
-				
+				step_q_values.append(q_vals)
+			
+			# Store actions and q-values for the state we were in when making the decision
+			trajectory[-1]["actions"] = actions
+			trajectory[-1]["q_values"] = step_q_values
+			
+			prev_obs = obs
 			obs, terminated, truncated = env.step(actions)
-			trajectory.append(clone_obs(obs))
+			
+			# Compute reward for transition
+			step_rewards = []
+			step_breakdowns = []
+			for i in range(num_agents):
+				rew = 0.0
+				bd = None
+				if compute_reward is not None:
+					try:
+						rew, bd = compute_reward(prev_obs, obs, i, return_breakdown=True)
+					except Exception:
+						try:
+							rew = compute_reward(prev_obs, obs, i)
+						except Exception:
+							pass
+				step_rewards.append(rew)
+				step_breakdowns.append(bd)
+				cum_rewards[i] += rew
+				
+			obs_cloned = clone_obs(obs)
+			obs_cloned["rewards"] = step_rewards
+			obs_cloned["cum_rewards"] = list(cum_rewards)
+			obs_cloned["actions"] = [0] * num_agents
+			obs_cloned["q_values"] = [None] * num_agents
+			obs_cloned["breakdowns"] = step_breakdowns
+			
+			trajectory.append(obs_cloned)
 			done = terminated or truncated
 			step += 1
 
