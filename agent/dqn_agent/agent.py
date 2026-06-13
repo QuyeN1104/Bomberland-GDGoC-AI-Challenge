@@ -217,7 +217,7 @@ class TrainingAgent:
         self.global_step += 1
         return loss.item(), td_err
 
-    def _load(self, path):
+    def _load(self, path, requested_lr=None):
         ckpt = torch.load(path, map_location=self.device)
         spec = ckpt.get("input_spec", ckpt.get("input_shape", ckpt["input_dim"]))
         self.map_shape = tuple(spec[0])
@@ -227,11 +227,20 @@ class TrainingAgent:
         self.q_net = DuelingDQN(self.map_shape, self.aux_dim,
                                 self.num_actions, noisy=noisy).to(self.device)
         self.q_net.load_state_dict(ckpt["model_state_dict"])
-        self.lr = ckpt.get("lr", 5e-4)
+        
+        # Sửa lỗi ghi đè LR: Ưu tiên LR từ argument, nếu không có mới lấy từ checkpoint
+        current_lr = requested_lr if requested_lr is not None else ckpt.get("lr", 5e-4)
+        self.lr = current_lr
+        
+        # Luôn tạo Optimizer mới với LR hiện tại
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.lr,
                                      eps=1.5e-4, weight_decay=1e-5)
-        if "optimizer_state_dict" in ckpt:
+                                     
+        # CHỈ load quán tính (momentum) cũ nếu đang resume train (cùng LR)
+        # Nếu đổi LR (sang Phase 2), ta để Optimizer "sạch" để hội tụ mượt hơn
+        if "optimizer_state_dict" in ckpt and requested_lr is None:
             self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            
         self.global_step = ckpt.get("global_step", 0)
         self.episode_count = ckpt.get("episode_count", 0)
 
@@ -406,7 +415,7 @@ class Agent:
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "best_model.pth"
+        ckpt_path = Path(__file__).parent / "best_model_simp.pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:
