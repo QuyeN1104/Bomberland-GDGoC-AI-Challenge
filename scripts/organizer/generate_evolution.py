@@ -6,14 +6,23 @@ import sys
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
-from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from competition.integrations.drive_upload import get_drive_service, _find_child_folder_id, _create_folder
 
 def main():
     repo_root = Path(__file__).resolve().parent.parent.parent
-    load_dotenv(repo_root / ".env")
+    
+    # Manually parse .env to avoid requiring python-dotenv
+    env_path = repo_root / ".env"
+    if env_path.exists():
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    os.environ[key.strip()] = val.strip()
+
     drive_folder_id = os.getenv("DRIVE_FOLDER_ID")
     if not drive_folder_id:
         print("ERROR: DRIVE_FOLDER_ID not found in .env")
