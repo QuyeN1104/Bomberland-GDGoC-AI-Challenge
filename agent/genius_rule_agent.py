@@ -6,10 +6,10 @@ class GeniusRuleAgent:
     """
     Actions:
     0: STOP
-    1: LEFT
-    2: RIGHT
-    3: UP
-    4: DOWN
+    1: LEFT -> UP
+    2: RIGHT -> DOWN
+    3: UP -> LEFT
+    4: DOWN -> RIGHT
     5: PLACE_BOMB
     """
 

@@ -66,11 +66,13 @@ Each step, the agent returns **1 integer**:
 | Value | Action |
 |---|---|
 | `0` | STOP (stay still) |
-| `1` | LEFT |
-| `2` | RIGHT |
-| `3` | UP |
-| `4` | DOWN |
+| `1` | LEFT -> UP |
+| `2` | RIGHT -> DOWN |
+| `3` | UP -> LEFT |
+| `4` | DOWN -> RIGHT |
 | `5` | PLACE_BOMB |
+
+**Note** (June 5, 2026): Found a coordinate bug in `engine/game.py`. Currently, the engine defines `x` as the row and `y` as the column, but the movement code accidentally swapped them. Because the competition has already started, we will keep the engine code exactly as it is so we don't break your existing agents. The updated table above shows what the actions actually do.
 
 **Movement Rules:**
 - Cannot move through walls (`1`) or boxes (`2`).
@@ -309,9 +311,9 @@ The system automatically maintains a pool of eligible agents for matchmaking:
 
 ## 6. Baseline Agents
 
-There are **6 rule-based baseline agents** with fixed ratings (do not change during the competition):
+There are **6 rule-based baseline agents** whose ratings dynamically update during the competition, allowing them to shift and accurately reflect the skill curve of the participant pool. Original ratings (obtained from running 1000+ matches with only baseline agents):
 
-| Name | Strategy | Score (μ − 3σ) |
+| Name | Strategy | Score (μ - 3σ) |
 |---|---|---|
 | `tactical_rule_agent` | Dodges danger, finds items, targets enemies, calculates bomb placement | ~114.7 |
 | `genius_rule_agent` | Balanced offense/defense, BFS pathfinding | ~112.5 |
@@ -353,11 +355,13 @@ Additionally, an **RL-based agent** (`dqn_agent`) is provided as a reference.
 |---|---|
 | 20/5 | Registration & Submissions open |
 | 24/5 | Workshop about the competition & RL |
-| 21/6 | **Submissions close** |
-| 21-22/6 | Top 8 selected → Grand Finals → Results Announcement |
+| 21/6 23:59 | **Submissions close** |
+| 22/6 00:00 - 12:00 | **Final Evaluation Phase** (Background evaluator continue to stabilize ratings) |
+| 22/6 12:00 | **Top 8 Selected & Grand Finals Start** |
 | 24/6 | Pitching & Award ceremony |
 
 **Expected Scale:** 25-30 teams, open to external participants.
+**Updated as of 4pm 1/6/2026**: 250 teams registered.
 
 ---
 
@@ -365,7 +369,7 @@ Additionally, an **RL-based agent** (`dqn_agent`) is provided as a reference.
 
 ### Selecting Top K
 
-After freezing the leaderboard on **21/6**, **Top 8 teams** are selected based on their best submission, with the following eligibility requirements and tiebreakers:
+After the 12-hour Final Evaluation Phase concludes at **12:00 PM on 22/6**, the **Top 8 teams** are selected based on their best submission, with the following eligibility requirements and tiebreakers:
 
 **Eligibility:**
 - Only the **best submission per team** (`is_team_best = 1`) is considered.
@@ -393,7 +397,7 @@ One **best baseline agent** will also participate as a benchmark.
 ### Grand Finals Tie-break
 
 If total points are tied:
-1. Frozen Leaderboard Score (`μ − 3σ`)
+1. Leaderboard Score after 12 hours of the final phase (`μ − 3σ`)
 2. Higher `μ`
 3. Lower `σ`
 

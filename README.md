@@ -53,7 +53,12 @@ Teams build intelligent agents using strategies from tree search to deep reinfor
 If you want to run the submission server locally for testing, follow these steps to accurately simulate the sandboxed VM environment:
 
 1.  **Setup Environment**:
+    > **Note on Conda ToS**: Recent versions of conda require you to accept their Terms of Service. If you get an error, run these commands first:
     ```bash
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+    
+    conda create -n aic_gdgoc python=3.11 -y
     conda activate aic_gdgoc
     pip install -r requirements.txt
     ```
