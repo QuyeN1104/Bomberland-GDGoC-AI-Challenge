@@ -78,6 +78,7 @@ python -m scripts.participant.run_local_match --agent_paths path/to/your/agent/ 
 ```
 
 #### Arguments:
+*   `--no-limit`: Disables single-thread limitations, allowing your agent to run freely using all available CPU threads (useful for debugging, but won't reflect the production environment).
 *   `--agent_paths`: Expects exactly 4 arguments representing the 4 players. You can pass:
     *   **A folder path** (e.g., `agent/dqn_agent/`): Perfect for Deep Reinforcement Learning agents. It will automatically load `agent.py` inside that folder, allowing your agent to load its weights relative to itself.
     *   **A file path** (e.g., `agent/random_agent.py`): Perfect for rule-based agents that don't need external weights.

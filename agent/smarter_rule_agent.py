@@ -5,7 +5,7 @@ from collections import deque
 class SmarterRuleAgent:
     """
     Actions:
-    0: STOP, 1: LEFT, 2: RIGHT, 3: UP, 4: DOWN, 5: PLACE_BOMB
+    0: STOP, 1: LEFT, 2: RIGHT, 3: UP, 4: DOWN, 5: PLACE_BOMB -> currently wrong, updated to: 1: UP, 2: DOWN, 3: LEFT, 4: RIGHT
     """
 
     MOVES = {

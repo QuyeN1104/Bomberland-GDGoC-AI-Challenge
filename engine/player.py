@@ -5,10 +5,10 @@ class Player:
     MAX_BOMB_RADIUS = 5
     MAX_BOMB_CAPACITY = 5
     STOP = 0
-    LEFT = 1
-    RIGHT = 2
-    UP = 3
-    DOWN = 4
+    LEFT = 1  # Note: Visually moves UP
+    RIGHT = 2 # Note: Visually moves DOWN
+    UP = 3    # Note: Visually moves LEFT
+    DOWN = 4  # Note: Visually moves RIGHT
     PLACE_BOMB = 5
     
     def __init__(self, player_id, row, col):

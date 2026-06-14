@@ -1,14 +1,17 @@
 import os
+import sys
+
 # Force single-threaded execution to simulate production VM constraints
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
+# unless the participant opts out using --no-limit
+if "--no-limit" not in sys.argv:
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import random
 import argparse
-import sys
 from pathlib import Path
 
 parent_dir = Path(__file__).resolve().parent.parent
@@ -160,6 +163,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--visualize", type=str2bool, default=False)
     parser.add_argument("--autoplay", type=str2bool, default=True)
+    parser.add_argument("--no-limit", action="store_true", help="Disable single-thread restrictions")
     args = parser.parse_args()
     
     if args.visualize:

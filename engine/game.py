@@ -3,7 +3,7 @@ from .map import Map
 from .bomb import Bomb
 from .player import Player
 class BomberEnv:
-    # N_ACTIONS = 6 # 0: STOP, 1: LEFT, 2: RIGHT, 3: UP, 4: DOWN, 5: PLACE_BOMB
+    # N_ACTIONS = 6 # 0: STOP, 1: LEFT, 2: RIGHT, 3: UP, 4: DOWN, 5: PLACE_BOMB -> currently wrong, updated to: 1: UP, 2: DOWN, 3: LEFT, 4: RIGHT
     
     def __init__(self, width=13, height=13, max_steps=500, seed=None):
         self.width = width 
@@ -53,10 +53,12 @@ class BomberEnv:
                 continue
             
             dx, dy = 0, 0
-            if action == Player.LEFT: dx = -1
-            elif action == Player.RIGHT: dx = 1
-            elif action == Player.UP: dy = -1
-            elif action == Player.DOWN: dy = 1
+            # BRUH i wrongly identify dx dy
+            # TODO: After the competition ends, just need to fix this and keep the old docs
+            if action == Player.LEFT: dx = -1 # actually UP, should have been dy = -1
+            elif action == Player.RIGHT: dx = 1 # actually DOWN, should have been dy = 1
+            elif action == Player.UP: dy = -1 # actually LEFT, should have been dx = -1
+            elif action == Player.DOWN: dy = 1 # actually RIGHT, should have been dx = 1
             elif action == Player.PLACE_BOMB:
                 if player.bombs_left <= 0:
                     continue

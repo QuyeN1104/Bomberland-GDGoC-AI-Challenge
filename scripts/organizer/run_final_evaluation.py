@@ -16,6 +16,11 @@ ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 from competition.config import load_env
 load_env()
 
+# Save original drive folder for the final Zip upload, then disable it
+# so MatchRunner skips individual file uploads
+ORIGINAL_DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
+os.environ["DRIVE_FOLDER_ID"] = ""
+
 from competition.evaluation.match_runner import MatchRunner
 
 DEFAULT_DB_PATH = str(ROOT_DIR / "competition.db")
@@ -176,6 +181,7 @@ def run_final_evaluation(db_path: str, matches_per_combo: int, parallel_workers:
     # Score tracking
     scores = {sid: 0 for sid in participant_ids}
     games_played = {sid: 0 for sid in participant_ids}
+    match_history_rows = []
     
     start_time = time.time()
     
@@ -192,6 +198,13 @@ def run_final_evaluation(db_path: str, matches_per_combo: int, parallel_workers:
                 for i, sid in enumerate(res["participants"]):
                     scores[sid] += res["points"][i]
                     games_played[sid] += 1
+                    
+                match_history_rows.append({
+                    "JSON File": os.path.basename(res["json_path"]),
+                    "Team Names": ", ".join(res["team_names"]),
+                    "Submission IDs": ", ".join(res["participants"]),
+                    "Ranks": ", ".join(map(str, res["ranks"]))
+                })
             else:
                 error_count += 1
                 logger.error(f"Match failed: {res.get('reason')}")
@@ -248,7 +261,33 @@ def run_final_evaluation(db_path: str, matches_per_combo: int, parallel_workers:
     with open(report_path, "w") as f:
         json.dump(report, f, indent=4)
         
-    logger.info(f"Saved detailed report to {report_path}")
+    csv_path = os.path.join("logs", "finals", "match_history.csv")
+    import csv
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["JSON File", "Team Names", "Submission IDs", "Ranks"])
+        writer.writeheader()
+        writer.writerows(match_history_rows)
+        
+    logger.info(f"Saved detailed report to {report_path} and CSV history to {csv_path}")
+    
+    # Zip the logs/finals directory
+    import shutil
+    archive_base = os.path.join("logs", "grand_finals_archive")
+    logger.info(f"Zipping logs/finals into {archive_base}.zip ...")
+    shutil.make_archive(archive_base, "zip", os.path.join("logs", "finals"))
+    zip_path = f"{archive_base}.zip"
+    
+    # Upload Zip to Google Drive
+    archive_drive_url = ""
+    if ORIGINAL_DRIVE_FOLDER_ID and os.path.exists(zip_path):
+        from competition.integrations.drive_upload import upload_file_to_drive
+        logger.info("Uploading ZIP archive to Google Drive...")
+        try:
+            upload_res = upload_file_to_drive(None, ORIGINAL_DRIVE_FOLDER_ID, zip_path)
+            archive_drive_url = upload_res.get("web_view_link", "")
+            logger.info(f"Successfully uploaded ZIP. URL: {archive_drive_url}")
+        except Exception as e:
+            logger.error(f"Failed to upload ZIP to Drive: {e}")
 
     # Push to Google Sheets "Grand Final" tab
     credentials_file = os.getenv("LEADERBOARD_CREDENTIALS_FILE", "secrets/service_account_credentials.json")
@@ -268,7 +307,11 @@ def run_final_evaluation(db_path: str, matches_per_combo: int, parallel_workers:
             sheet_name = "Grand Final"
             _ensure_sheet_tab(service, spreadsheet_id, sheet_name)
             
-            values = [["Rank", "Team Name", "Submission ID", "Total Points", "Matches Played", "Avg Points/Match"]]
+            values = [
+                ["Grand Finals Match Archive (ZIP)", archive_drive_url, "", "", "", ""],
+                ["", "", "", "", "", ""],
+                ["Rank", "Team Name", "Submission ID", "Total Points", "Matches Played", "Avg Points/Match"]
+            ]
             for rank, st in enumerate(standings, 1):
                 values.append([
                     str(rank),
