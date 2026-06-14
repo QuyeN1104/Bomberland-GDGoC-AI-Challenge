@@ -1,15 +1,9 @@
-"""Hybrid Reward v5.1 — Strict Conditional Shaping & Glitch Fixes for Bomberland DQN.
+"""Hybrid Reward v5.2 — Local Attention & Exponential Shaping for Bomberland DQN.
 
-Continuous dynamic reward multipliers based on bombs_left:
-  - hunt_w = min(bombs_left / 2, 1.0)  — linear ramp [0→1]
-  - farm_w = 1 - hunt_w                — complementary
-
-v5.1 Fixes:
-  - Ghost Penalty Eliminated: Agent no longer bleeds points after death.
-  - The Dance of Death (Reward Hacking) fixed: No rewards for escaping danger.
-  - Bomb-phobia Grace Period: 1-step immunity when dropping a bomb.
-  - Transit Penalty Removed: Free movement inside blast zones, punished only for standing still.
-  - Wall-Humping Bug fixed: Approach Enemy now uses BFS pathfinding instead of Manhattan.
+Continuous dynamic reward multipliers:
+  - Exponential Hunt Curve: hunt_w = min(bombs_left / 3.0, 1.0) ** 2
+  - Local Bounded BFS: Radar limits for Item (5) and Enemy (8) to reduce global noise.
+  - Action Justification: Bomb planting exempt from standing still penalty.
 """
 import numpy as np
 from collections import deque
@@ -32,7 +26,7 @@ REWARD_DICT = {
     "enemy_death": 3.0,          
     "agent_death": -5.0,         
 
-    # ── Di chuyển & Chống núp lùm ──
+    # ── Di chuyển & Thuế ──
     "standing_still": -0.05,     
     "time_penalty": -0.02,       
 
@@ -45,22 +39,22 @@ REWARD_DICT = {
     "suicide_bomb_plant": -2.0,  
     "chain_bomb_plant": 0.50,    
 
-    # ── Cơ chế né bom (Đã triệt tiêu Reward Hacking) ──
+    # ── Né bom ──
     "danger_enter": -1.00,       
     "post_bomb_linger": -0.50,   
 
     # ── Kinh tế & Vật phẩm ──
     "item_collection": 0.80,     
-    "approach_item": 0.10,       
+    "approach_item": 0.02,       # FIXED: Đã giảm mạnh để tránh lạm phát
     "item_compete_bonus": 0.15,  
     "survival_bonus": 0.02,      
 
-    # ── Định vị không gian (Giới hạn farm điểm) ──
+    # ── Định vị không gian ──
     "approach_enemy": 0.02,      
 }
 
 # =====================================================================
-# 2. CÁC HÀM BỔ TRỢ HÌNH HỌC & TÌM ĐƯỜNG (BFS)
+# 2. CÁC HÀM BỔ TRỢ HÌNH HỌC & RADAR (BOUNDED BFS)
 # =====================================================================
 def _parse_bomb_row(b):
     arr = np.asarray(b, dtype=np.float64).ravel()
@@ -144,13 +138,63 @@ def _can_escape_after_placing_bfs(grid, my_pos, occupied_enemies, danger_soon, b
     return False
 
 
-def _manhattan_to_nearest_item(grid, x, y):
-    ix, iy = int(x), int(y)
+def _bfs_dist_to_nearest_item(grid, start_x, start_y, max_radius=5):
+    """FIXED: Radar quét Vật phẩm trong bán kính cục bộ (Bỏ Manhattan toàn cục)."""
     item_positions = np.argwhere((grid == ITEM_RADIUS) | (grid == ITEM_CAPACITY))
     if len(item_positions) == 0:
         return None
-    distances = [abs(ix - ip[0]) + abs(iy - ip[1]) for ip in item_positions]
-    return min(distances)
+
+    items = {(int(p[0]), int(p[1])) for p in item_positions}
+    H, W = grid.shape
+    q = deque([(int(start_x), int(start_y), 0)])
+    vis = {(int(start_x), int(start_y))}
+    
+    while q:
+        cx, cy, d = q.popleft()
+        if (cx, cy) in items:
+            return d
+        if d >= max_radius:
+            continue
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = cx + dx, cy + dy
+            if 0 <= nx < H and 0 <= ny < W and (nx, ny) not in vis:
+                if int(grid[nx, ny]) not in (WALL, BOX):
+                    vis.add((nx, ny))
+                    q.append((nx, ny, d + 1))
+    return None
+
+
+def _bfs_dist_to_nearest_enemy(grid, players, agent_id, max_radius=8):
+    """FIXED: Radar quét Kẻ địch trong bán kính cục bộ."""
+    arr = np.asarray(players)
+    if arr.ndim == 1: arr = arr.reshape(1, -1)
+    H, W = grid.shape
+    
+    enemies = set()
+    for pid in range(arr.shape[0]):
+        if pid != agent_id and int(arr[pid][2]) == 1:
+            enemies.add((int(arr[pid][0]), int(arr[pid][1])))
+            
+    if not enemies:
+        return None 
+        
+    start_x, start_y = int(arr[agent_id][0]), int(arr[agent_id][1])
+    q = deque([(start_x, start_y, 0)])
+    vis = {(start_x, start_y)}
+    
+    while q:
+        cx, cy, d = q.popleft()
+        if (cx, cy) in enemies:
+            return d
+        if d >= max_radius:
+            continue
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = cx + dx, cy + dy
+            if 0 <= nx < H and 0 <= ny < W and (nx, ny) not in vis:
+                if int(grid[nx, ny]) not in (WALL, BOX):
+                    vis.add((nx, ny))
+                    q.append((nx, ny, d + 1))
+    return None 
 
 
 def _competitive_item_advantage(grid, players, agent_id, ax, ay):
@@ -179,38 +223,6 @@ def _competitive_item_advantage(grid, players, agent_id, ax, ay):
             advantage = (min_enemy_dist - my_dist) / max_dist
             total_advantage += min(advantage, 1.0)
     return total_advantage
-
-
-def _bfs_dist_to_nearest_enemy(grid, players, agent_id):
-    """Thay thế Manhattan: Tính khoảng cách thực tế (né tường) tới kẻ địch."""
-    arr = np.asarray(players)
-    if arr.ndim == 1: arr = arr.reshape(1, -1)
-    H, W = grid.shape
-    
-    enemies = set()
-    for pid in range(arr.shape[0]):
-        if pid != agent_id and int(arr[pid][2]) == 1:
-            enemies.add((int(arr[pid][0]), int(arr[pid][1])))
-            
-    if not enemies:
-        return 999 
-        
-    start_x, start_y = int(arr[agent_id][0]), int(arr[agent_id][1])
-    q = deque([(start_x, start_y, 0)])
-    vis = {(start_x, start_y)}
-    
-    while q:
-        cx, cy, d = q.popleft()
-        if (cx, cy) in enemies:
-            return d
-            
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            nx, ny = cx + dx, cy + dy
-            if 0 <= nx < H and 0 <= ny < W and (nx, ny) not in vis:
-                if int(grid[nx, ny]) not in (WALL, BOX):
-                    vis.add((nx, ny))
-                    q.append((nx, ny, d + 1))
-    return 999 
 
 
 def _detect_chain_bomb(grid, players, bomb_x, bomb_y, bomb_radius, existing_bombs):
@@ -256,7 +268,6 @@ def _min_blast_timer_at(obs, x, y):
     arr = np.asarray(bombs)
     if arr.size == 0: return None
     if arr.ndim == 1: arr = arr.reshape(1, -1)
-
     players = obs["players"]
     grid = obs["map"]
     best = None
@@ -276,11 +287,9 @@ def _get_own_blast_zone(obs, agent_id):
     arr = np.asarray(bombs)
     if arr.size == 0: return set()
     if arr.ndim == 1: arr = arr.reshape(1, -1)
-
     players = obs["players"]
     grid = obs["map"]
     own_blast = set()
-
     for i in range(arr.shape[0]):
         parsed = _parse_bomb_row(arr[i])
         if parsed is None: continue
@@ -317,8 +326,15 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
     reward = 0.0
     breakdown = {}
 
-    curr_bombs_left = int(curr_players[agent_id][3])
-    hunt_w = min(curr_bombs_left / 2.0, 1.0)
+    prev_ammo = int(prev_players[agent_id][3])
+    curr_ammo = int(curr_players[agent_id][3])
+    
+    # Biến kiểm tra hành động nhả bom (Để cấp quyền miễn trừ)
+    just_planted_action = (curr_ammo < prev_ammo)
+
+    # FIXED: Đường cong sát thủ hàm mũ (Ngưỡng 3 bom, bình phương)
+    base_ratio = min(curr_ammo / 3.0, 1.0)
+    hunt_w = base_ratio ** 2  
     farm_w = 1.0 - hunt_w
 
     prev_x, prev_y = int(prev_players[agent_id][0]), int(prev_players[agent_id][1])
@@ -347,11 +363,9 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
                     own_kills += 1
                     
         if own_kills > 0:
-            enemy_death_reward = REWARD_DICT["enemy_death"] * own_kills
-            enemy_death_reward *= (1.0 + 1.0 * hunt_w)
-    if enemy_death_reward != 0.0:
-        reward += enemy_death_reward
-        breakdown["Kill Enemy"] = enemy_death_reward
+            enemy_death_reward = REWARD_DICT["enemy_death"] * own_kills * (1.0 + 1.0 * hunt_w)
+            reward += enemy_death_reward
+            breakdown["Kill Enemy"] = enemy_death_reward
 
     if curr_enemies_alive == 0 and prev_enemies_alive > 0:
         win_reward = REWARD_DICT["win"]
@@ -359,17 +373,19 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
         breakdown["Win Match"] = win_reward
 
     # -----------------------------------------------------------------
-    # CHỐNG NÚP LÙM
+    # CHỐNG NÚP LÙM (FIXED: Có ngoại lệ Đặt bom)
     # -----------------------------------------------------------------
     danger_soon_prev, _ = _get_danger_tiles(prev_obs["map"], prev_obs["bombs"], prev_players)
     danger_soon_curr, _ = _get_danger_tiles(curr_obs["map"], curr_obs["bombs"], curr_players)
 
     if prev_x == curr_x and prev_y == curr_y:
-        still_pen = REWARD_DICT["standing_still"]
-        if (curr_x, curr_y) in danger_soon_curr:
-            still_pen *= 0.3 
-        reward += still_pen
-        breakdown["Standing Still"] = still_pen
+        # Chỉ phạt núp lùm nếu KHÔNG PHẢI đang đứng im để đặt bom
+        if not just_planted_action:
+            still_pen = REWARD_DICT["standing_still"]
+            if (curr_x, curr_y) in danger_soon_curr:
+                still_pen *= 0.3 
+            reward += still_pen
+            breakdown["Standing Still"] = still_pen
     else:
         still_bonus = -REWARD_DICT["standing_still"]
         reward += still_bonus
@@ -380,14 +396,14 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
     breakdown["Time Penalty"] = time_pen
 
     # -----------------------------------------------------------------
-    # VẬT PHẨM
+    # VẬT PHẨM (FIXED: Radar Bounded BFS)
     # -----------------------------------------------------------------
-    prev_item_d = _manhattan_to_nearest_item(prev_obs["map"], prev_x, prev_y)
-    curr_item_d = _manhattan_to_nearest_item(curr_obs["map"], curr_x, curr_y)
+    prev_item_d = _bfs_dist_to_nearest_item(prev_obs["map"], prev_x, prev_y, max_radius=5)
+    curr_item_d = _bfs_dist_to_nearest_item(curr_obs["map"], curr_x, curr_y, max_radius=5)
 
     if prev_item_d is not None and curr_item_d is not None:
-        approach_item_reward = REWARD_DICT["approach_item"] * (prev_item_d - curr_item_d)
-        approach_item_reward *= (1.0 + 2.0 * farm_w)
+        d_diff = prev_item_d - curr_item_d
+        approach_item_reward = REWARD_DICT["approach_item"] * d_diff * farm_w
         if approach_item_reward != 0.0:
             reward += approach_item_reward
             breakdown["Approach Item"] = approach_item_reward
@@ -399,29 +415,24 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
 
     item_advantage = _competitive_item_advantage(curr_obs["map"], curr_players, agent_id, curr_x, curr_y)
     if item_advantage > 0:
-        compete_reward = REWARD_DICT["item_compete_bonus"] * item_advantage
-        compete_reward *= (1.0 + 1.0 * farm_w)
+        compete_reward = REWARD_DICT["item_compete_bonus"] * item_advantage * (1.0 + 1.0 * farm_w)
         reward += compete_reward
         breakdown["Item Advantage"] = compete_reward
 
     # -----------------------------------------------------------------
-    # NÉ BOM SINH TỒN THÔNG MINH (Đã xử lý Transit Penalty & Grace Period)
+    # NÉ BOM SINH TỒN THÔNG MINH
     # -----------------------------------------------------------------
     prev_in_danger = (prev_x, prev_y) in danger_soon_prev
     curr_in_danger = (curr_x, curr_y) in danger_soon_curr
 
-    prev_ammo = int(prev_players[agent_id][3])
-    curr_ammo = int(curr_players[agent_id][3])
-    just_planted_check = (curr_ammo < prev_ammo)
-
-    if not prev_in_danger and curr_in_danger and not just_planted_check:
+    if not prev_in_danger and curr_in_danger and not just_planted_action:
         if prev_x != curr_x or prev_y != curr_y:
             enter_danger_pen = REWARD_DICT["danger_enter"]
             reward += enter_danger_pen
             breakdown["Enter Danger"] = enter_danger_pen
 
     if curr_in_danger:
-        if prev_x == curr_x and prev_y == curr_y and not just_planted_check:
+        if prev_x == curr_x and prev_y == curr_y and not just_planted_action:
             min_timer = _min_blast_timer_at(curr_obs, curr_x, curr_y)
             urgency = (8.0 / max(min_timer, 1)) if min_timer else 4.0
             linger_penalty = REWARD_DICT["post_bomb_linger"] * urgency
@@ -429,14 +440,16 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
             breakdown["Linger Danger"] = linger_penalty
 
     # -----------------------------------------------------------------
-    # TIẾP CẬN KẺ ĐỊCH (BFS Tránh kẹt tường)
+    # TIẾP CẬN KẺ ĐỊCH (FIXED: Radar Bounded BFS)
     # -----------------------------------------------------------------
     if prev_enemies_alive > 0 and curr_enemies_alive > 0:
-        prev_enemy_d = _bfs_dist_to_nearest_enemy(prev_obs["map"], prev_players, agent_id)
-        curr_enemy_d = _bfs_dist_to_nearest_enemy(curr_obs["map"], curr_players, agent_id)
+        prev_enemy_d = _bfs_dist_to_nearest_enemy(prev_obs["map"], prev_players, agent_id, max_radius=8)
+        curr_enemy_d = _bfs_dist_to_nearest_enemy(curr_obs["map"], curr_players, agent_id, max_radius=8)
         
-        if curr_enemy_d < 999 and curr_enemy_d < prev_enemy_d:
-            approach_enemy_reward = REWARD_DICT["approach_enemy"] * (1.0 + 2.0 * hunt_w)
+        # Chỉ xét khi địch nằm trong Radar ở cả 2 bước
+        if prev_enemy_d is not None and curr_enemy_d is not None:
+            d_diff = prev_enemy_d - curr_enemy_d
+            approach_enemy_reward = REWARD_DICT["approach_enemy"] * d_diff * (1.0 + 2.0 * hunt_w)
             if approach_enemy_reward != 0.0:
                 reward += approach_enemy_reward
                 breakdown["Approach Enemy"] = approach_enemy_reward
@@ -486,15 +499,13 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
             my_blast = _explosion_tiles_for_bomb(prev_obs["map"], curr_x, curr_y, my_radius)
             enemy_in_blast = sum(1 for epos in enemies_set if epos in my_blast)
             if enemy_in_blast > 0:
-                plant_enemy_reward = REWARD_DICT["plant_near_enemy"] * enemy_in_blast
-                plant_enemy_reward *= (1.0 + 1.0 * hunt_w) 
+                plant_enemy_reward = REWARD_DICT["plant_near_enemy"] * enemy_in_blast * (1.0 + 1.0 * hunt_w) 
                 reward += plant_enemy_reward
                 breakdown["Plant Near Enemy"] = plant_enemy_reward
 
             chain_count = _detect_chain_bomb(prev_obs["map"], prev_players, curr_x, curr_y, my_radius, prev_obs["bombs"])
             if chain_count > 0:
-                chain_reward = REWARD_DICT["chain_bomb_plant"] * chain_count
-                chain_reward *= (1.0 + 1.0 * hunt_w) 
+                chain_reward = REWARD_DICT["chain_bomb_plant"] * chain_count * (1.0 + 1.0 * hunt_w) 
                 reward += chain_reward
                 breakdown["Chain Bomb Plant"] = chain_reward
         else:
@@ -518,8 +529,7 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
                 own_boxes_destroyed += 1
 
         if own_boxes_destroyed > 0:
-            box_reward = REWARD_DICT["box_destroyed"] * own_boxes_destroyed
-            box_reward *= (1.0 + 1.0 * farm_w)
+            box_reward = REWARD_DICT["box_destroyed"] * own_boxes_destroyed * (1.0 + 1.0 * farm_w)
             reward += box_reward
             breakdown["Destroy Box"] = box_reward
 
