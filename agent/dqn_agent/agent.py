@@ -7,6 +7,8 @@ Upgrades over previous versions:
   - Survival Instinct: Overrides exploration to force escaping when standing on an active bomb.
   - Combo Tactics: 10% chance to drop consecutive bombs while escaping.
   - Local Epsilon Tracking: Fine-tuning correctly decays epsilon for the current run only.
+  - FIXED: Allows movement through bombs (Channel 7) and bounds checking includes edge tiles.
+  - FIXED: Blocks placing bombs if there is already a bomb under feet.
 """
 from pathlib import Path
 import numpy as np
@@ -80,11 +82,11 @@ class TrainingAgent:
         valid = set()
         for action, (dx, dy) in self._ACTION_DELTAS.items():
             nx, ny = ax + dx, ay + dy
-            if not (0 < nx < H - 1 and 0 < ny < W - 1):
+            # FIXED: Cho phép đi sát mép bản đồ (0 <= nx < H)
+            if not (0 <= nx < H and 0 <= ny < W):
                 continue
+            # FIXED: Chỉ chặn Tường (1) và Hòm (2). Cho phép đi xuyên bom.
             if map_state[1, nx, ny] > 0.5 or map_state[2, nx, ny] > 0.5:
-                continue
-            if map_state[7, nx, ny] > 0.01:
                 continue
             valid.add(action)
         return valid
@@ -94,6 +96,8 @@ class TrainingAgent:
         has_bombs = aux_state is None or float(aux_state[0]) > 0
 
         is_in_danger = False
+        bomb_under_feet = False
+        
         if map_state is not None:
             pos_ch = map_state[5]
             pos = np.argwhere(pos_ch > 0.5)
@@ -101,9 +105,10 @@ class TrainingAgent:
                 ax, ay = int(pos[0][0]), int(pos[0][1])
                 if map_state[7, ax, ay] > 0.01:
                     is_in_danger = True
+                    bomb_under_feet = True # Xác định có bom dưới chân
 
         if is_in_danger:
-            if has_bombs and random.random() < self.COMBO_BOMB_PROB:
+            if has_bombs and not bomb_under_feet and random.random() < self.COMBO_BOMB_PROB:
                 self._last_random_action = self.BOMB_ACTION
                 return self.BOMB_ACTION
             
@@ -113,7 +118,7 @@ class TrainingAgent:
                 return action
             return 0  
 
-        if has_bombs:
+        if has_bombs and not bomb_under_feet:
             bomb_prob = self.BOMB_EXPLORE_PROB
             if map_state is not None and len(pos) > 0:
                 if map_state[11, ax, ay] > 0.01:  
@@ -136,16 +141,12 @@ class TrainingAgent:
         return action
 
     def act(self, map_state, aux_state, is_training=True):
-        """Epsilon-greedy with Action Masking and Explicit NoisyNet toggling."""
-        # 1. Random Exploration Phase (Warmup)
         if is_training and self.epsilon > 0 and random.random() < self.epsilon:
             return self._random_action_bomb_biased(map_state, aux_state)
             
-        # 2. Exploitation Phase (Q-Network with Action Masking)
         mt = torch.from_numpy(map_state).unsqueeze(0).to(self.device)
         at = torch.from_numpy(aux_state).unsqueeze(0).to(self.device)
         
-        # Bật noise khi đang thu thập dữ liệu train, tắt noise nếu đang test/đánh giá
         if is_training:
             self.q_net.train()
         else:
@@ -161,8 +162,16 @@ class TrainingAgent:
                 if act_idx not in valid_moves:
                     mask[act_idx] = False
                     
+            # FIXED: Chặn spam bom
             has_bombs = float(aux_state[0]) > 0
-            if not has_bombs:
+            bomb_under_feet = False
+            pos = np.argwhere(map_state[5] > 0.5)
+            if len(pos) > 0:
+                ax, ay = int(pos[0][0]), int(pos[0][1])
+                if map_state[7, ax, ay] > 0.01:
+                    bomb_under_feet = True
+                    
+            if not has_bombs or bomb_under_feet:
                 mask[self.BOMB_ACTION] = False
                 
             q_values[~mask] = -float('inf')
@@ -185,7 +194,6 @@ class TrainingAgent:
         d_t   = torch.from_numpy(done).unsqueeze(1).to(dev)
         g = n_step_gamma if n_step_gamma else self.gamma
 
-        # Đảm bảo mạng đang ở chế độ train để lấy Gradient
         self.q_net.train()
         q = self.q_net(ms_t, ax_t).gather(1, a_t)
 
@@ -210,7 +218,6 @@ class TrainingAgent:
         for tp, sp in zip(self.target_net.parameters(), self.q_net.parameters()):
             tp.data.copy_(self.tau * sp.data + (1 - self.tau) * tp.data)
 
-        # Trộn lại nhiễu sau khi cập nhật trọng số
         self.q_net.reset_noise()
         self.target_net.reset_noise()
 
@@ -228,16 +235,12 @@ class TrainingAgent:
                                 self.num_actions, noisy=noisy).to(self.device)
         self.q_net.load_state_dict(ckpt["model_state_dict"])
         
-        # Sửa lỗi ghi đè LR: Ưu tiên LR từ argument, nếu không có mới lấy từ checkpoint
         current_lr = requested_lr if requested_lr is not None else ckpt.get("lr", 5e-4)
         self.lr = current_lr
         
-        # Luôn tạo Optimizer mới với LR hiện tại
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.lr,
                                      eps=1.5e-4, weight_decay=1e-5)
                                      
-        # CHỈ load quán tính (momentum) cũ nếu đang resume train (cùng LR)
-        # Nếu đổi LR (sang Phase 2), ta để Optimizer "sạch" để hội tụ mượt hơn
         if "optimizer_state_dict" in ckpt and requested_lr is None:
             self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             
@@ -324,7 +327,6 @@ def train_dqn(user_id=0, enemy_type="simple", num_episodes=100,
 
             env_step = 0
             for _ in range(max_steps):
-                # is_training=True đảm bảo NoisyNet hoạt động trong quá trình thu thập data
                 ua = agent.act(ms, axs, is_training=True)
                 actions = [None, None, None, None]
                 actions[ep_user_id] = ua
@@ -415,7 +417,7 @@ class Agent:
         self.device = torch.device("cpu")
         self.q_net = None
 
-        ckpt_path = Path(__file__).parent / "best_model_phase2_3000.pth"
+        ckpt_path = Path(__file__).parent / "latest_checkpoint_test.pth"
         if ckpt_path.exists():
             self._load(str(ckpt_path))
         else:
@@ -435,8 +437,6 @@ class Agent:
         
         self.q_net.load_state_dict(ckpt["model_state_dict"])
         self.q_net.to(self.device)
-        
-        # VÔ HIỆU HOÁ NOISE CHO QUÁ TRÌNH THI ĐẤU/ĐÁNH GIÁ (TUYỆT ĐỐI QUAN TRỌNG)
         self.q_net.eval()
 
     def _get_valid_moves(self, map_state):
@@ -451,11 +451,11 @@ class Agent:
         valid = set()
         for action, (dx, dy) in {1: (-1, 0), 2: (1, 0), 3: (0, -1), 4: (0, 1)}.items():
             nx, ny = ax + dx, ay + dy
-            if not (0 < nx < H - 1 and 0 < ny < W - 1):
+            # FIXED: Cho phép đi sát mép bản đồ (0 <= nx < H)
+            if not (0 <= nx < H and 0 <= ny < W):
                 continue
+            # FIXED: Chỉ chặn Tường (1) và Hòm (2). Cho phép đi xuyên bom.
             if map_state[1, nx, ny] > 0.5 or map_state[2, nx, ny] > 0.5:
-                continue
-            if map_state[7, nx, ny] > 0.01:
                 continue
             valid.add(action)
         return valid
@@ -476,8 +476,16 @@ class Agent:
                     if act_idx not in valid_moves:
                         mask[act_idx] = False
                         
+                # FIXED: Chặn spam bom
                 has_bombs = float(axs[0]) > 0
-                if not has_bombs:
+                bomb_under_feet = False
+                pos = np.argwhere(ms[5] > 0.5)
+                if len(pos) > 0:
+                    ax, ay = int(pos[0][0]), int(pos[0][1])
+                    if ms[7, ax, ay] > 0.01:
+                        bomb_under_feet = True
+                        
+                if not has_bombs or bomb_under_feet:
                     mask[5] = False
                     
                 q_values[~mask] = -float('inf')

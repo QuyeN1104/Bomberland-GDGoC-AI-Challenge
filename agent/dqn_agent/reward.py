@@ -4,6 +4,8 @@ Continuous dynamic reward multipliers:
   - Exponential Hunt Curve: hunt_w = min(bombs_left / 3.0, 1.0) ** 2
   - Local Bounded BFS: Radar limits for Item (5) and Enemy (8) to reduce global noise.
   - Action Justification: Bomb planting exempt from standing still penalty.
+  - FIXED: Linger penalty correctly penalizes "fire dancing" (moving between 2 danger tiles).
+  - FIXED: BFS pathfinding treats impending explosions (danger_now) as walls.
 """
 import numpy as np
 from collections import deque
@@ -45,7 +47,7 @@ REWARD_DICT = {
 
     # ── Kinh tế & Vật phẩm ──
     "item_collection": 0.80,     
-    "approach_item": 0.02,       # FIXED: Đã giảm mạnh để tránh lạm phát
+    "approach_item": 0.02,       
     "item_compete_bonus": 0.15,  
     "survival_bonus": 0.02,      
 
@@ -110,7 +112,7 @@ def _get_danger_tiles(grid, bombs, players):
         radius = _bomb_radius_from_obs(players, owner_id)
         blast = _explosion_tiles_for_bomb(grid, bx, by, radius)
         danger_soon |= blast
-        if timer <= 1:
+        if timer <= 2:  # Bom sắp nổ trong 1-2 tick tới
             danger_now |= blast
     return danger_soon, danger_now
 
@@ -138,8 +140,8 @@ def _can_escape_after_placing_bfs(grid, my_pos, occupied_enemies, danger_soon, b
     return False
 
 
-def _bfs_dist_to_nearest_item(grid, start_x, start_y, max_radius=5):
-    """FIXED: Radar quét Vật phẩm trong bán kính cục bộ (Bỏ Manhattan toàn cục)."""
+def _bfs_dist_to_nearest_item(grid, start_x, start_y, danger_now, max_radius=5):
+    """FIXED: Radar quét Vật phẩm. Né các ô chuẩn bị nổ (danger_now)."""
     item_positions = np.argwhere((grid == ITEM_RADIUS) | (grid == ITEM_CAPACITY))
     if len(item_positions) == 0:
         return None
@@ -158,14 +160,15 @@ def _bfs_dist_to_nearest_item(grid, start_x, start_y, max_radius=5):
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             nx, ny = cx + dx, cy + dy
             if 0 <= nx < H and 0 <= ny < W and (nx, ny) not in vis:
-                if int(grid[nx, ny]) not in (WALL, BOX):
+                # Không đi vào tường, hòm và các ô sắp nổ lập tức
+                if int(grid[nx, ny]) not in (WALL, BOX) and (nx, ny) not in danger_now:
                     vis.add((nx, ny))
                     q.append((nx, ny, d + 1))
     return None
 
 
-def _bfs_dist_to_nearest_enemy(grid, players, agent_id, max_radius=8):
-    """FIXED: Radar quét Kẻ địch trong bán kính cục bộ."""
+def _bfs_dist_to_nearest_enemy(grid, players, danger_now, agent_id, max_radius=8):
+    """FIXED: Radar quét Kẻ địch. Né các ô chuẩn bị nổ (danger_now)."""
     arr = np.asarray(players)
     if arr.ndim == 1: arr = arr.reshape(1, -1)
     H, W = grid.shape
@@ -191,7 +194,8 @@ def _bfs_dist_to_nearest_enemy(grid, players, agent_id, max_radius=8):
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             nx, ny = cx + dx, cy + dy
             if 0 <= nx < H and 0 <= ny < W and (nx, ny) not in vis:
-                if int(grid[nx, ny]) not in (WALL, BOX):
+                # Không đi vào tường, hòm và các ô sắp nổ lập tức
+                if int(grid[nx, ny]) not in (WALL, BOX) and (nx, ny) not in danger_now:
                     vis.add((nx, ny))
                     q.append((nx, ny, d + 1))
     return None 
@@ -313,9 +317,6 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
     prev_alive = int(prev_players[agent_id][2])
     curr_alive = int(curr_players[agent_id][2])
 
-    # -----------------------------------------------------------------
-    # LUẬT SỐNG CÒN (Ghost Penalty Fixed)
-    # -----------------------------------------------------------------
     if prev_alive == 1 and curr_alive == 0:
         death_val = float(REWARD_DICT["agent_death"])
         return (death_val, {"Death": death_val}) if return_breakdown else death_val
@@ -328,21 +329,15 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
 
     prev_ammo = int(prev_players[agent_id][3])
     curr_ammo = int(curr_players[agent_id][3])
-    
-    # Biến kiểm tra hành động nhả bom (Để cấp quyền miễn trừ)
     just_planted_action = (curr_ammo < prev_ammo)
 
-    # FIXED: Đường cong sát thủ hàm mũ (Ngưỡng 3 bom, bình phương)
-    base_ratio = min(curr_ammo / 3.0, 1.0)
+    base_ratio = min(curr_ammo / 2.5, 1.0)
     hunt_w = base_ratio ** 2  
     farm_w = 1.0 - hunt_w
 
     prev_x, prev_y = int(prev_players[agent_id][0]), int(prev_players[agent_id][1])
     curr_x, curr_y = int(curr_players[agent_id][0]), int(curr_players[agent_id][1])
 
-    # -----------------------------------------------------------------
-    # CHIẾN ĐẤU & KINH TẾ
-    # -----------------------------------------------------------------
     prev_enemies_alive = _enemy_alive_count(prev_players, agent_id)
     curr_enemies_alive = _enemy_alive_count(curr_players, agent_id)
 
@@ -372,14 +367,11 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
         reward += win_reward
         breakdown["Win Match"] = win_reward
 
-    # -----------------------------------------------------------------
-    # CHỐNG NÚP LÙM (FIXED: Có ngoại lệ Đặt bom)
-    # -----------------------------------------------------------------
-    danger_soon_prev, _ = _get_danger_tiles(prev_obs["map"], prev_obs["bombs"], prev_players)
-    danger_soon_curr, _ = _get_danger_tiles(curr_obs["map"], curr_obs["bombs"], curr_players)
+    # Trích xuất Danger zones cho hàm BFS và hàm Né bom
+    danger_soon_prev, danger_now_prev = _get_danger_tiles(prev_obs["map"], prev_obs["bombs"], prev_players)
+    danger_soon_curr, danger_now_curr = _get_danger_tiles(curr_obs["map"], curr_obs["bombs"], curr_players)
 
     if prev_x == curr_x and prev_y == curr_y:
-        # Chỉ phạt núp lùm nếu KHÔNG PHẢI đang đứng im để đặt bom
         if not just_planted_action:
             still_pen = REWARD_DICT["standing_still"]
             if (curr_x, curr_y) in danger_soon_curr:
@@ -395,11 +387,9 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
     reward += time_pen
     breakdown["Time Penalty"] = time_pen
 
-    # -----------------------------------------------------------------
-    # VẬT PHẨM (FIXED: Radar Bounded BFS)
-    # -----------------------------------------------------------------
-    prev_item_d = _bfs_dist_to_nearest_item(prev_obs["map"], prev_x, prev_y, max_radius=5)
-    curr_item_d = _bfs_dist_to_nearest_item(curr_obs["map"], curr_x, curr_y, max_radius=5)
+    # VẬT PHẨM (Tích hợp danger_now vào BFS)
+    prev_item_d = _bfs_dist_to_nearest_item(prev_obs["map"], prev_x, prev_y, danger_now_prev, max_radius=5)
+    curr_item_d = _bfs_dist_to_nearest_item(curr_obs["map"], curr_x, curr_y, danger_now_curr, max_radius=5)
 
     if prev_item_d is not None and curr_item_d is not None:
         d_diff = prev_item_d - curr_item_d
@@ -419,9 +409,7 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
         reward += compete_reward
         breakdown["Item Advantage"] = compete_reward
 
-    # -----------------------------------------------------------------
     # NÉ BOM SINH TỒN THÔNG MINH
-    # -----------------------------------------------------------------
     prev_in_danger = (prev_x, prev_y) in danger_soon_prev
     curr_in_danger = (curr_x, curr_y) in danger_soon_curr
 
@@ -431,22 +419,20 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
             reward += enter_danger_pen
             breakdown["Enter Danger"] = enter_danger_pen
 
+    # FIXED: Trò lừa "Múa Lửa" (Bỏ check tọa độ prev_x == curr_x)
     if curr_in_danger:
-        if prev_x == curr_x and prev_y == curr_y and not just_planted_action:
+        if not just_planted_action:
             min_timer = _min_blast_timer_at(curr_obs, curr_x, curr_y)
             urgency = (8.0 / max(min_timer, 1)) if min_timer else 4.0
             linger_penalty = REWARD_DICT["post_bomb_linger"] * urgency
             reward += linger_penalty
             breakdown["Linger Danger"] = linger_penalty
 
-    # -----------------------------------------------------------------
-    # TIẾP CẬN KẺ ĐỊCH (FIXED: Radar Bounded BFS)
-    # -----------------------------------------------------------------
+    # TIẾP CẬN KẺ ĐỊCH (Tích hợp danger_now vào BFS)
     if prev_enemies_alive > 0 and curr_enemies_alive > 0:
-        prev_enemy_d = _bfs_dist_to_nearest_enemy(prev_obs["map"], prev_players, agent_id, max_radius=8)
-        curr_enemy_d = _bfs_dist_to_nearest_enemy(curr_obs["map"], curr_players, agent_id, max_radius=8)
+        prev_enemy_d = _bfs_dist_to_nearest_enemy(prev_obs["map"], prev_players, danger_now_prev, agent_id, max_radius=8)
+        curr_enemy_d = _bfs_dist_to_nearest_enemy(curr_obs["map"], curr_players, danger_now_curr, agent_id, max_radius=8)
         
-        # Chỉ xét khi địch nằm trong Radar ở cả 2 bước
         if prev_enemy_d is not None and curr_enemy_d is not None:
             d_diff = prev_enemy_d - curr_enemy_d
             approach_enemy_reward = REWARD_DICT["approach_enemy"] * d_diff * (1.0 + 2.0 * hunt_w)
@@ -454,9 +440,7 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
                 reward += approach_enemy_reward
                 breakdown["Approach Enemy"] = approach_enemy_reward
 
-    # -----------------------------------------------------------------
     # ĐẶT BOM
-    # -----------------------------------------------------------------
     just_planted = False
     if curr_obs["bombs"] is not None:
         arr_b = np.asarray(curr_obs["bombs"])
@@ -513,9 +497,7 @@ def compute_reward(prev_obs, curr_obs, agent_id, return_breakdown=False):
             reward += suicide_rew
             breakdown["Suicide Bomb Plant"] = suicide_rew
 
-    # -----------------------------------------------------------------
     # PHÁ HÒM
-    # -----------------------------------------------------------------
     prev_map = prev_obs["map"]
     curr_map = curr_obs["map"]
     own_blast = _get_own_blast_zone(prev_obs, agent_id)
